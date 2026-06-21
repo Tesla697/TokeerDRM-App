@@ -27,6 +27,10 @@ OST_RELEASES_API = "https://api.github.com/repos/OpenSteam001/OpenSteamTool/rele
 OST_DLLS = ("dwmapi.dll", "xinput1_4.dll", "OpenSteamTool.dll")
 ENGINE_CORES = ("OpenSteamTool.dll", "mktl.dll")  # either = Denuvo-capable engine
 
+# Run console helpers (tasklist/taskkill/powershell) without flashing a window —
+# the app is a windowed exe, so any console child would otherwise pop up.
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+
 TOML = (
     "# Written by TokeerDRM — read the existing SteamTools library so every game\n"
     "# stays unlocked under OpenSteamTool.\n"
@@ -71,7 +75,8 @@ def steam_path():
 def _steam_running():
     try:
         out = subprocess.run(["tasklist", "/fi", "imagename eq steam.exe"],
-                             capture_output=True, text=True, timeout=10).stdout.lower()
+                             capture_output=True, text=True, timeout=10,
+                             creationflags=_NO_WINDOW).stdout.lower()
         return "steam.exe" in out
     except Exception:
         return False
@@ -150,7 +155,7 @@ def _ensure_toml(sp):
 def _shutdown_steam(sp):
     exe = os.path.join(sp, "steam.exe")
     try:
-        subprocess.run([exe, "-shutdown"], timeout=20)
+        subprocess.run([exe, "-shutdown"], timeout=20, creationflags=_NO_WINDOW)
     except Exception:
         pass
     for _ in range(30):
@@ -159,7 +164,7 @@ def _shutdown_steam(sp):
         time.sleep(1)
     # hard kill anything still alive (steam + a stray SteamTools manager)
     for name in ("steam.exe", "SteamTools.exe"):
-        subprocess.run(["taskkill", "/f", "/im", name], capture_output=True)
+        subprocess.run(["taskkill", "/f", "/im", name], capture_output=True, creationflags=_NO_WINDOW)
     time.sleep(2)
 
 
@@ -167,7 +172,7 @@ def _start_steam(sp):
     try:
         os.startfile(os.path.join(sp, "steam.exe"))  # noqa: S606
     except Exception:
-        subprocess.Popen([os.path.join(sp, "steam.exe")])
+        subprocess.Popen([os.path.join(sp, "steam.exe")], creationflags=_NO_WINDOW)
 
 
 def is_admin():
@@ -221,8 +226,7 @@ def _add_defender_exclusion(path):
         subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              f"Add-MpPreference -ExclusionPath '{path}' -ErrorAction SilentlyContinue"],
-            capture_output=True, timeout=40,
-            creationflags=0x08000000 if sys.platform == "win32" else 0,
+            capture_output=True, timeout=40, creationflags=_NO_WINDOW,
         )
     except Exception:
         pass

@@ -380,7 +380,8 @@ def _ensure_webview2() -> bool:
         url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"  # official bootstrapper
         dst = os.path.join(tempfile.gettempdir(), "MicrosoftEdgeWebView2Setup.exe")
         urllib.request.urlretrieve(url, dst)
-        subprocess.run([dst, "/silent", "/install"], timeout=600)
+        subprocess.run([dst, "/silent", "/install"], timeout=600,
+                       creationflags=(0x08000000 if sys.platform == "win32" else 0))
     except Exception as e:
         _msgbox("TokeerDRM",
                 f"Couldn't install WebView2 automatically:\n{e}\n\n"
