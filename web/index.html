@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>TokeerDRM</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- animated aurora background -->
+  <div class="aurora">
+    <span class="blob b1"></span>
+    <span class="blob b2"></span>
+    <span class="blob b3"></span>
+    <div class="grid-overlay"></div>
+  </div>
+
+  <main class="shell">
+    <div class="card" id="card">
+
+      <!-- header -->
+      <header class="head">
+        <div class="brand">
+          <div class="logo"><span>T</span></div>
+          <div class="brand-text">
+            <h1>TokeerDRM</h1>
+            <p>Activation tickets, the easy way</p>
+          </div>
+        </div>
+        <div class="status-pill" id="statusPill" title="Server status">
+          <span class="dot"></span>
+          <span class="status-text" id="statusText">connecting…</span>
+        </div>
+      </header>
+
+      <!-- engine setup banner (shown only when OpenSteamTool isn't active) -->
+      <div class="engine-banner" id="engineBanner" hidden>
+        <div class="eb-row">
+          <span class="eb-icon">⚙</span>
+          <div class="eb-text">
+            <strong>One-time setup: OpenSteamTool</strong>
+            <span id="engineBannerMsg">Denuvo codes need OpenSteamTool active in Steam. Install it once — your games stay put.</span>
+          </div>
+          <button class="btn small" id="engineBtn">
+            <span class="btn-label">Set it up</span>
+            <span class="spinner"></span>
+          </button>
+        </div>
+        <div class="eb-progress" id="engineProgress" hidden>
+          <div class="eb-track"><div class="eb-bar" id="engineBar"></div></div>
+          <span class="eb-pct" id="enginePct">0%</span>
+        </div>
+      </div>
+
+      <!-- tab switcher -->
+      <nav class="tabs" id="tabs">
+        <button class="tab active" data-tab="activate">
+          <svg viewBox="0 0 24 24"><path d="M7 14a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm3-1 8-8m-3 0h3v3"/></svg>
+          Activate
+        </button>
+        <button class="tab" data-tab="generate">
+          <svg viewBox="0 0 24 24"><path d="M12 3v6m0 0 3-3m-3 3L9 6m-4 9a7 7 0 1 0 14 0"/></svg>
+          Generate
+        </button>
+        <button class="tab" data-tab="engine">
+          <svg viewBox="0 0 24 24"><path d="M4 21v-6M4 11V3M12 21v-9M12 8V3M20 21v-4M20 13V3M1 15h6M9 8h6M17 17h6"/></svg>
+          Engine
+        </button>
+        <span class="tab-glider" id="glider"></span>
+      </nav>
+
+      <!-- panels -->
+      <section class="panels">
+
+        <!-- ACTIVATE -->
+        <div class="panel show" data-panel="activate">
+          <h2 class="panel-title">Redeem a code</h2>
+          <p class="panel-sub">Paste the 6-character code you received. We'll apply the ticket so you can launch the game from Steam.</p>
+
+          <div class="code-boxes" id="codeBoxes">
+            <input class="cbox" maxlength="1" inputmode="text" autocomplete="off" />
+            <input class="cbox" maxlength="1" inputmode="text" autocomplete="off" />
+            <input class="cbox" maxlength="1" inputmode="text" autocomplete="off" />
+            <input class="cbox" maxlength="1" inputmode="text" autocomplete="off" />
+            <input class="cbox" maxlength="1" inputmode="text" autocomplete="off" />
+            <input class="cbox" maxlength="1" inputmode="text" autocomplete="off" />
+          </div>
+
+          <button class="btn primary block" id="applyBtn">
+            <span class="btn-label">Apply ticket</span>
+            <span class="spinner"></span>
+          </button>
+
+          <div class="result" id="redeemResult"></div>
+        </div>
+
+        <!-- GENERATE -->
+        <div class="panel" data-panel="generate">
+          <h2 class="panel-title">Generate a code to share</h2>
+          <p class="panel-sub">Enter a game's Steam AppID. If your signed-in account owns it, you'll get a shareable code — no install or launch needed.</p>
+
+          <div class="fields">
+            <label class="field">
+              <span class="field-label">Steam AppID</span>
+              <input class="input" id="appIdInput" inputmode="numeric" placeholder="e.g. 1969520" spellcheck="false" autocomplete="off" />
+              <span class="game-name" id="gameName"></span>
+            </label>
+          </div>
+          <p class="hint">Each code is <strong>single-use</strong> and expires in <strong>30 minutes</strong> — generate it right before the recipient launches the game.</p>
+
+          <button class="btn primary block" id="genBtn">
+            <span class="btn-label">Generate code</span>
+            <span class="spinner"></span>
+          </button>
+
+          <div class="codeReveal" id="codeReveal"></div>
+          <div class="result" id="genResult"></div>
+        </div>
+
+        <!-- ENGINE (OpenSteamTool) -->
+        <div class="panel" data-panel="engine">
+          <h2 class="panel-title">OpenSteamTool engine</h2>
+          <p class="panel-sub">Denuvo codes need OpenSteamTool active in Steam. Install, repair, or remove it here — your game library is preserved either way.</p>
+
+          <div class="engine-state" id="engineState">
+            <span class="es-dot" id="esDot"></span>
+            <span id="esText">checking…</span>
+          </div>
+
+          <div class="engine-actions">
+            <button class="btn primary block" id="ostInstallBtn">
+              <span class="btn-label">Install OpenSteamTool</span>
+              <span class="spinner"></span>
+            </button>
+            <button class="btn ghost block" id="ostUninstallBtn">
+              <span class="btn-label">Uninstall</span>
+              <span class="spinner"></span>
+            </button>
+          </div>
+
+          <div class="eb-progress" id="ostProgress" hidden>
+            <div class="eb-track"><div class="eb-bar" id="ostBar"></div></div>
+            <span class="eb-pct" id="ostPct">0%</span>
+          </div>
+          <div class="result" id="ostResult"></div>
+        </div>
+
+      </section>
+
+      <footer class="foot">
+        <span>Self-hosted · no launcher · no nonsense</span>
+      </footer>
+    </div>
+  </main>
+
+  <!-- force-update gate (blocks everything when outdated) -->
+  <div class="update-gate" id="updateGate" hidden>
+    <div class="ug-card">
+      <div class="ug-icon">⬆</div>
+      <h2>Update required</h2>
+      <p id="ugText">A newer version of TokeerDRM is available. Please update to continue.</p>
+      <button class="btn primary" id="ugBtn"><span class="btn-label">Download latest</span></button>
+    </div>
+  </div>
+
+  <!-- toast -->
+  <div class="toast-wrap" id="toastWrap"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

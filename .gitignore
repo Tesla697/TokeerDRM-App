@@ -1,0 +1,17 @@
+# build artifacts
+build/
+dist/
+__pycache__/
+*.pyc
+
+# extract_tickets.exe output (appid-named folders + raw dumps)
+[0-9]*/
+*.bin
+
+# PUA-flagged engine payload (downloaded at runtime, never committed)
+OpenSteamTool-Release.zip
+
+# private server address — never commit
+server_config.py
+
+*.log
