@@ -18,6 +18,7 @@ import io
 import os
 import re
 import sys
+import json
 import time
 import zipfile
 import subprocess
@@ -26,6 +27,13 @@ import urllib.request
 OST_RELEASES_API = "https://api.github.com/repos/OpenSteam001/OpenSteamTool/releases/latest"
 OST_DLLS = ("dwmapi.dll", "xinput1_4.dll", "OpenSteamTool.dll")
 ENGINE_CORES = ("OpenSteamTool.dll", "mktl.dll")  # either = Denuvo-capable engine
+
+# Marker we drop in the Steam folder recording the OST release tag we installed, so
+# we can tell (a) that WE set OST up here (→ a later breakage is a clobber to repair,
+# not a first-time install) and (b) when a newer release is available (→ auto-update).
+_VERSION_FILE = ".tokeer_ost_version"
+_LATEST_TTL = 6 * 3600  # don't re-hit GitHub more than ~every 6h
+_latest_cache = {"tag": None, "at": 0.0}
 
 # Run console helpers (tasklist/taskkill/powershell) without flashing a window —
 # the app is a windowed exe, so any console child would otherwise pop up.
@@ -116,6 +124,68 @@ def engine_status():
         "ready": installed and toml_ok,
         "steam_running": _steam_running(),
     }
+
+
+def latest_release_tag(timeout=15):
+    """Latest OpenSteamTool release tag from GitHub, cached ~6h. None on failure."""
+    now = time.time()
+    if _latest_cache["tag"] and (now - _latest_cache["at"]) < _LATEST_TTL:
+        return _latest_cache["tag"]
+    try:
+        req = urllib.request.Request(OST_RELEASES_API, headers={"User-Agent": "TokeerDRM"})
+        data = json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
+        tag = data.get("tag_name")
+        if tag:
+            _latest_cache.update(tag=tag, at=now)
+        return tag
+    except Exception:
+        return None
+
+
+def installed_tag(sp=None):
+    """The OST release tag we last installed here (from the marker), or None."""
+    sp = sp or steam_path()
+    if not sp:
+        return None
+    try:
+        with open(os.path.join(sp, _VERSION_FILE), "r", encoding="utf-8") as f:
+            return (f.read().strip() or None)
+    except OSError:
+        return None
+
+
+def _stamp_version(sp, tag):
+    if not (sp and tag):
+        return
+    try:
+        with open(os.path.join(sp, _VERSION_FILE), "w", encoding="utf-8") as f:
+            f.write(tag)
+    except OSError:
+        pass
+
+
+def ensure_engine():
+    """Decide what the engine needs — WITHOUT elevating. Returns a dict:
+        {action, status, installed_tag, latest_tag}
+    action is one of:
+      'none'   — ready and current; nothing to do.
+      'install'— never set up by us (no marker) and not ready → first-time, let the
+                 user click (don't surprise them with a UAC prompt on first launch).
+      'repair' — we installed OST here before (marker present) but it's now broken
+                 (Steam update clobbered the DLLs/toml) → safe to auto-fix.
+      'update' — ready, but a newer OST release exists → auto-update.
+    The caller (app) acts on 'repair'/'update' automatically and shows the banner for
+    'install'."""
+    st = engine_status()
+    sp = st.get("steam_path")
+    seen = installed_tag(sp)
+    if not st.get("ready"):
+        return {"action": ("repair" if seen else "install"), "status": st,
+                "installed_tag": seen, "latest_tag": None}
+    latest = latest_release_tag()
+    if latest and seen and latest != seen:
+        return {"action": "update", "status": st, "installed_tag": seen, "latest_tag": latest}
+    return {"action": "none", "status": st, "installed_tag": seen, "latest_tag": latest}
 
 
 def _ensure_toml(sp):
@@ -250,11 +320,13 @@ def _download_release_zip(progress):
     return urllib.request.urlopen(req, timeout=120).read()
 
 
-def install_ost(progress=_noop, fallback_zip=None):
+def install_ost(progress=_noop, fallback_zip=None, force=False):
     """Install official OpenSteamTool. Returns {ok, message}.
 
     fallback_zip: optional path to a bundled OpenSteamTool-Release.zip used if the
-    GitHub download fails (offline)."""
+    GitHub download fails (offline).
+    force: re-download and replace the engine DLLs even if they're already present —
+    used for updates (the config-only shortcut would otherwise skip the new build)."""
     sp = steam_path()
     if not sp:
         return {"ok": False, "message": "Steam not found. Install/run Steam first."}
@@ -262,10 +334,10 @@ def install_ost(progress=_noop, fallback_zip=None):
     # Config-only path: OST is already installed (e.g. the user set it up
     # manually) but the toml isn't pointing at config\stplug-in. Don't re-download
     # or restart Steam — just allow it in Defender and merge the lua path (OST
-    # hot-reloads the toml).
+    # hot-reloads the toml). Skipped on force (updates must replace the DLLs).
     dlls_present = (next((c for c in ENGINE_CORES if os.path.exists(os.path.join(sp, c))), None)
                     and all(os.path.exists(os.path.join(sp, d)) for d in ("dwmapi.dll", "xinput1_4.dll")))
-    if dlls_present:
+    if dlls_present and not force:
         progress(50, "OpenSteamTool found — finishing setup…")
         _add_defender_exclusion(sp)
         progress(80, "Letting it read your existing library…")
@@ -273,6 +345,7 @@ def install_ost(progress=_noop, fallback_zip=None):
             _ensure_toml(sp)
         except PermissionError:
             return {"ok": False, "message": "Permission denied writing the OST config. Run as Administrator."}
+        _stamp_version(sp, latest_release_tag())
         progress(100, "OpenSteamTool is ready.")
         return {"ok": True, "message": "OpenSteamTool configured — redeem your code."}
 
@@ -355,6 +428,7 @@ def install_ost(progress=_noop, fallback_zip=None):
         if os.path.exists(os.path.join(sp, "OpenSteamTool.dll")):
             break
 
+    _stamp_version(sp, latest_release_tag())
     progress(100, "OpenSteamTool installed.")
     return {"ok": True, "message": "OpenSteamTool installed. Sign in to Steam, then redeem your code."}
 
@@ -372,7 +446,7 @@ def uninstall_ost(progress=_noop):
     progress(50, "Removing OpenSteamTool…")
     try:
         for f in ("OpenSteamTool.dll", "opensteamtool.toml", "opensteamtool.toml.tokeer.bak",
-                  "dwmapi.dll", "xinput1_4.dll"):
+                  "dwmapi.dll", "xinput1_4.dll", _VERSION_FILE):
             try:
                 os.remove(os.path.join(sp, f))
             except OSError:

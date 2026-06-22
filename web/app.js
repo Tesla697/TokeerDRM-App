@@ -212,7 +212,22 @@ function updateEnginePanel(s) {
 async function refreshEngine() {
   let s = null;
   try {
-    s = await call("engine_status");
+    const chk = await call("engine_check");   // {action, status, installed_tag, latest_tag}
+    s = (chk && chk.status) || null;
+    const action = chk && chk.action;
+    // Auto-heal: if WE set OST up here before and a Steam update clobbered it
+    // ('repair'), or a newer OST release is out ('update'), fix it automatically —
+    // once per launch so a declined UAC prompt can't loop. First-time installs
+    // ('install') stay manual (the banner) so a brand-new user isn't surprised by UAC.
+    if ((action === "repair" || action === "update") && !window.__engineAutoRan) {
+      window.__engineAutoRan = true;
+      showEngineBanner(action === "update"
+        ? "Updating OpenSteamTool to the latest version…"
+        : "OpenSteamTool needs repair — approve the Windows prompt…");
+      await runEngineAction(action === "update" ? "update_engine" : "install_engine",
+        $("#engineBtn"), action === "update" ? "OpenSteamTool updated" : "OpenSteamTool repaired");
+      return;  // runEngineAction schedules a follow-up refreshEngine
+    }
     const ok = !!(s && s.ready);
     if (ok) hideEngineBanner();
     else showEngineBanner(s && s.installed

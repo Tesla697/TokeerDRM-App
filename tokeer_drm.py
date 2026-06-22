@@ -183,6 +183,19 @@ class Api:
         except Exception as e:
             return {"installed": False, "error": str(e)}
 
+    def engine_check(self) -> dict:
+        """What does the engine need (no elevation)? Drives auto-repair/update on
+        launch: returns {action: none|install|repair|update, status, installed_tag,
+        latest_tag}. The UI auto-runs install_engine() for repair/update."""
+        try:
+            return ost_setup.ensure_engine()
+        except Exception as e:
+            try:
+                st = ost_setup.engine_status()
+            except Exception:
+                st = {"ready": False, "installed": False}
+            return {"action": "none", "status": st, "error": str(e)}
+
     def install_engine(self) -> dict:
         """Install official OpenSteamTool. Needs admin (writes into Program Files +
         sets a Defender exclusion), so if we're not elevated, relaunch elevated via
@@ -213,6 +226,39 @@ class Api:
             return ost_setup.install_ost(
                 progress=progress,
                 fallback_zip=resource_path("OpenSteamTool-Release.zip"),
+            )
+        except Exception as e:
+            return {"ok": False, "message": str(e)}
+
+    def update_engine(self) -> dict:
+        """Force-update OpenSteamTool to the latest release (re-downloads + replaces
+        the engine even if it's already present). Elevates via UAC when needed."""
+        if not ost_setup.is_admin():
+            try:
+                if WINDOW is not None:
+                    WINDOW.evaluate_js(
+                        "window.__ostProgress && window.__ostProgress(15, "
+                        "'Approve the Windows prompt to update…')")
+                ost_setup.relaunch_elevated("--update-engine")
+            except Exception as e:
+                return {"ok": False, "message": f"Administrator approval is required: {e}"}
+            st = ost_setup.engine_status()
+            if st.get("ready"):
+                return {"ok": True, "message": "OpenSteamTool updated."}
+            return {"ok": False, "message": "Update didn't complete — was the prompt declined? Try again."}
+
+        def progress(pct, msg):
+            try:
+                if WINDOW is not None:
+                    WINDOW.evaluate_js(
+                        f"window.__ostProgress && window.__ostProgress({int(pct)}, {json.dumps(msg)})")
+            except Exception:
+                pass
+        try:
+            return ost_setup.install_ost(
+                progress=progress,
+                fallback_zip=resource_path("OpenSteamTool-Release.zip"),
+                force=True,
             )
         except Exception as e:
             return {"ok": False, "message": str(e)}
@@ -425,6 +471,12 @@ if __name__ == "__main__":
     if "--install-engine" in sys.argv:
         try:
             ost_setup.install_ost()
+        except Exception:
+            pass
+        sys.exit(0)
+    if "--update-engine" in sys.argv:
+        try:
+            ost_setup.install_ost(force=True)
         except Exception:
             pass
         sys.exit(0)
