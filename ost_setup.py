@@ -28,6 +28,18 @@ OST_RELEASES_API = "https://api.github.com/repos/OpenSteam001/OpenSteamTool/rele
 OST_DLLS = ("dwmapi.dll", "xinput1_4.dll", "OpenSteamTool.dll")
 ENGINE_CORES = ("OpenSteamTool.dll", "mktl.dll")  # either = Denuvo-capable engine
 
+# Competing unlock engines we neutralise so OpenSteamTool is the ONLY one active
+# (this is what "switch to OST" really means, and what makes managers like LuaTools
+# stop showing their own backend as active):
+#   • FOREIGN_CORES   — other engines' core DLLs, disabled by name.
+#   • FOREIGN_PROXIES — proxy-hijack DLLs an engine might use to inject that AREN'T
+#     OST's (OST owns dwmapi.dll + xinput1_4.dll). Only disabled when their bytes tie
+#     them to a known unlocker, so a legitimate Steam DLL is never touched.
+FOREIGN_CORES = ("mktl.dll", "cloud_redirect.dll")
+FOREIGN_PROXIES = ("hid.dll", "version.dll", "winhttp.dll")
+_OWN_MARKERS = (b"OpenSteamTool", b"mktl")
+_FOREIGN_MARKERS = (b"cloud_redirect", b"SteamTools", b"steamtools", b"stplug", b"LuaTools", b"luatools")
+
 # Marker we drop in the Steam folder recording the OST release tag we installed, so
 # we can tell (a) that WE set OST up here (→ a later breakage is a clobber to repair,
 # not a first-time install) and (b) when a newer release is available (→ auto-update).
@@ -120,6 +132,50 @@ def _proxy_is_engine(sp):
         if not (b"OpenSteamTool" in data or b"mktl" in data):
             return False  # this proxy is SteamTools' / a stock DLL — OST isn't active
     return True
+
+
+def _disable_file(path):
+    """Rename path → path.bak (replacing any stale .bak). Returns True if moved."""
+    if not os.path.exists(path):
+        return False
+    try:
+        bak = path + ".bak"
+        if os.path.exists(bak):
+            os.remove(bak)
+        os.replace(path, bak)
+        return True
+    except Exception:
+        return False
+
+
+def _disable_foreign_engines(sp):
+    """Neutralise every OTHER unlock engine so ONLY OpenSteamTool is active.
+
+    Without this, installing OST's proxies makes OST *function*, but a leftover core
+    like cloud_redirect.dll stays on disk — so managers such as LuaTools, which judge
+    the active backend by file presence, keep showing CloudRedirect as ACTIVE and ask
+    the user to switch manually. Disabling the foreign core (and any foreign proxy)
+    is exactly what their "Switch to OpenSteamTool" button does. Returns names disabled."""
+    disabled = []
+    for core in FOREIGN_CORES:
+        if _disable_file(os.path.join(sp, core)):
+            disabled.append(core)
+    for proxy in FOREIGN_PROXIES:
+        p = os.path.join(sp, proxy)
+        if not os.path.exists(p):
+            continue
+        try:
+            with open(p, "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        if any(m in data for m in _OWN_MARKERS):
+            continue  # it's ours — leave it
+        # Only disable a proxy we can positively tie to a known unlocker, so we never
+        # rename a legitimate Steam DLL out from under Steam.
+        if any(s in data for s in _FOREIGN_MARKERS) and _disable_file(p):
+            disabled.append(proxy)
+    return disabled
 
 
 def engine_status():
@@ -369,6 +425,10 @@ def install_ost(progress=_noop, fallback_zip=None, force=False):
     if dlls_present and not force and _proxy_is_engine(sp):
         progress(50, "OpenSteamTool found — finishing setup…")
         _add_defender_exclusion(sp)
+        # A previous engine's core (e.g. cloud_redirect.dll) may still be sitting
+        # here, so other managers keep showing it as active — clear it. Safe while
+        # Steam runs: OST's proxies are active, so these files aren't loaded.
+        _disable_foreign_engines(sp)
         progress(80, "Letting it read your existing library…")
         try:
             _ensure_toml(sp)
@@ -406,7 +466,8 @@ def install_ost(progress=_noop, fallback_zip=None, force=False):
     progress(65, "Backing up current engine…")
     backup = os.path.join(sp, "tokeer-engine-backup")
     os.makedirs(backup, exist_ok=True)
-    for f in ("dwmapi.dll", "xinput1_4.dll", "mktl.dll", "OpenSteamTool.dll", "opensteamtool.toml"):
+    for f in ("dwmapi.dll", "xinput1_4.dll", "mktl.dll", "cloud_redirect.dll",
+              "hid.dll", "OpenSteamTool.dll", "opensteamtool.toml"):
         src = os.path.join(sp, f)
         if os.path.exists(src):
             try:
@@ -430,16 +491,10 @@ def install_ost(progress=_noop, fallback_zip=None, force=False):
         return {"ok": False, "message": "Permission denied writing to Steam folder. "
                                         "Run TokeerDRM as Administrator and retry."}
 
-    # Disable any old core so the hijack DLLs only load OpenSteamTool.dll.
-    mktl = os.path.join(sp, "mktl.dll")
-    if os.path.exists(mktl):
-        try:
-            bak = mktl + ".bak"
-            if os.path.exists(bak):
-                os.remove(bak)
-            os.replace(mktl, bak)
-        except Exception:
-            pass
+    # Disable every competing engine (mktl fork, CloudRedirect, a SteamTools proxy…)
+    # so the hijack DLLs only load OpenSteamTool.dll AND managers like LuaTools stop
+    # showing another backend as active. This is the actual "switch to OST".
+    _disable_foreign_engines(sp)
 
     # Point OST at the existing stplug-in library.
     progress(85, "Configuring…")
@@ -497,14 +552,17 @@ def uninstall_ost(progress=_noop):
             except OSError:
                 pass
 
-    # Un-orphan an mktl fork we may have disabled.
-    mb = os.path.join(sp, "mktl.dll.bak")
-    if os.path.exists(mb) and not os.path.exists(os.path.join(sp, "mktl.dll")):
-        try:
-            os.replace(mb, os.path.join(sp, "mktl.dll"))
-            restored = True
-        except OSError:
-            pass
+    # Un-orphan any engine core/proxy we disabled when switching to OST (mktl fork,
+    # CloudRedirect, a SteamTools proxy…) so the user's previous backend comes back.
+    for name in ("mktl.dll", "cloud_redirect.dll", "hid.dll", "version.dll", "winhttp.dll"):
+        bak = os.path.join(sp, name + ".bak")
+        live = os.path.join(sp, name)
+        if os.path.exists(bak) and not os.path.exists(live):
+            try:
+                os.replace(bak, live)
+                restored = True
+            except OSError:
+                pass
 
     progress(90, "Restarting Steam…")
     _start_steam(sp)
