@@ -38,7 +38,14 @@ ENGINE_CORES = ("OpenSteamTool.dll", "mktl.dll")  # either = Denuvo-capable engi
 FOREIGN_CORES = ("mktl.dll", "cloud_redirect.dll")
 FOREIGN_PROXIES = ("hid.dll", "version.dll", "winhttp.dll")
 _OWN_MARKERS = (b"OpenSteamTool", b"mktl")
-_FOREIGN_MARKERS = (b"cloud_redirect", b"SteamTools", b"steamtools", b"stplug", b"LuaTools", b"luatools")
+# Bytes that positively identify a foreign unlocker's proxy/core. SteamTools' hid.dll
+# carries NO "SteamTools"/"stplug" string, so we fingerprint it by its update hosts
+# (update.steamui.com, stools.oss-cn-shanghai.aliyuncs.com) and its typo'd IPC class
+# name "Vale_SteamIPC" — all verified against a real SteamTools hid.dll.
+_FOREIGN_MARKERS = (
+    b"cloud_redirect", b"SteamTools", b"steamtools", b"stplug", b"LuaTools", b"luatools",
+    b"steamui.com", b"stools.oss", b"Vale_SteamIPC",
+)
 
 # Marker we drop in the Steam folder recording the OST release tag we installed, so
 # we can tell (a) that WE set OST up here (→ a later breakage is a clobber to repair,
