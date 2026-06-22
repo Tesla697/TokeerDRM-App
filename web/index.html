@@ -159,7 +159,12 @@
       <div class="ug-icon">⬆</div>
       <h2>Update required</h2>
       <p id="ugText">A newer version of TokeerDRM is available. Please update to continue.</p>
-      <button class="btn primary" id="ugBtn"><span class="btn-label">Download latest</span></button>
+      <button class="btn primary" id="ugUpdateBtn"><span class="btn-label">Update now</span></button>
+      <div class="eb-progress" id="ugProgress" hidden>
+        <div class="eb-track"><div class="eb-bar" id="ugBar"></div></div>
+        <span class="eb-pct" id="ugPct">0%</span>
+      </div>
+      <button class="btn small" id="ugBtn"><span class="btn-label">Download from GitHub instead</span></button>
     </div>
   </div>
 

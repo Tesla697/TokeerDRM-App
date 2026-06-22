@@ -286,12 +286,32 @@ function initEngine() {
 }
 
 // ── force update ──────────────────────────────────────────────────────────────
+// Progress sink for the in-app updater (Python pushes here via __updProgress).
+function setUpdateProgress(p, m) {
+  const prog = $("#ugProgress"); if (prog) prog.hidden = false;
+  const bar = $("#ugBar"), pct = $("#ugPct");
+  if (bar) bar.style.width = `${p}%`;
+  if (pct) pct.textContent = `${p}%`;
+  if (m) { const t = $("#ugText"); if (t) t.textContent = m; }
+}
+
 async function checkUpdate() {
   try {
     const v = await call("version_info");
     if (v && v.update_required) {
+      window.__updProgress = setUpdateProgress;
       $("#ugText").textContent =
         `Version ${v.latest} is out — you're on ${v.current}. Update to keep using TokeerDRM.`;
+      // In-app: download + swap + relaunch, no browser needed.
+      const upd = $("#ugUpdateBtn");
+      if (upd) upd.onclick = async () => {
+        loading(upd, true);
+        setUpdateProgress(0, "Starting update…");
+        const r = await call("update_now");
+        if (r && !r.ok) { toast((r && r.message) || "Update failed", "err"); loading(upd, false); }
+        // on success the app exits and relaunches itself — nothing more to do
+      };
+      // Fallback: open the GitHub release to download manually.
       $("#ugBtn").onclick = () => call("open_url", v.url);
       $("#updateGate").hidden = false;   // blocks the whole UI
     }

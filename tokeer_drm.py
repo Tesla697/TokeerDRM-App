@@ -44,7 +44,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.1"                       # bump on every release
+APP_VERSION = "1.0.2"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -174,6 +174,79 @@ class Api:
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def update_now(self) -> dict:
+        """In-app self-update: download the latest release .exe, swap it in place,
+        and relaunch — no browser, no manual download. Only works in the packaged
+        (frozen) build; from source there's nothing to swap."""
+        if not getattr(sys, "frozen", False):
+            return {"ok": False, "message": "In-app update only works in the packaged app — use the GitHub link."}
+
+        def progress(pct, msg):
+            try:
+                if WINDOW is not None:
+                    WINDOW.evaluate_js(
+                        f"window.__updProgress && window.__updProgress({int(pct)}, {json.dumps(msg)})")
+            except Exception:
+                pass
+
+        try:
+            progress(5, "Finding the latest release…")
+            r = requests.get(f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest",
+                             headers={"User-Agent": "TokeerDRM"}, timeout=20)
+            r.raise_for_status()
+            asset = next((a for a in r.json().get("assets", [])
+                          if a.get("name", "").lower().endswith(".exe")), None)
+            if not asset:
+                return {"ok": False, "message": "The latest release has no .exe to download."}
+
+            cur_exe = sys.executable
+            new_exe = cur_exe + ".new"
+            progress(10, "Downloading update…")
+            with requests.get(asset["browser_download_url"], headers={"User-Agent": "TokeerDRM"},
+                              timeout=600, stream=True) as dl:
+                dl.raise_for_status()
+                total = int(dl.headers.get("Content-Length") or 0)
+                got = 0
+                with open(new_exe, "wb") as f:
+                    for chunk in dl.iter_content(65536):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        got += len(chunk)
+                        if total:
+                            progress(10 + int(got * 85 / total), "Downloading update…")
+
+            progress(98, "Restarting…")
+            # A detached helper waits for THIS process to exit (so the exe unlocks),
+            # swaps the new build over the old one, relaunches it, and deletes itself.
+            pid = os.getpid()
+            bat = os.path.join(tempfile.gettempdir(), f"tokeerdrm_update_{pid}.bat")
+            with open(bat, "w", encoding="ascii") as f:
+                f.write(
+                    "@echo off\r\n"
+                    ":wait\r\n"
+                    f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul && (ping -n 2 127.0.0.1 >nul & goto wait)\r\n'
+                    f'move /y "{new_exe}" "{cur_exe}" >nul\r\n'
+                    f'start "" "{cur_exe}"\r\n'
+                    'del "%~f0"\r\n'
+                )
+            DETACHED = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
+            subprocess.Popen(["cmd", "/c", bat], creationflags=DETACHED, close_fds=True)
+
+            def _quit():
+                import time as _t
+                _t.sleep(1)  # let the UI show "Restarting…" and the helper start polling
+                try:
+                    if WINDOW is not None:
+                        WINDOW.destroy()
+                except Exception:
+                    pass
+                os._exit(0)
+            threading.Thread(target=_quit, daemon=True).start()
+            return {"ok": True, "message": "Updating… TokeerDRM will restart automatically."}
+        except Exception as e:
+            return {"ok": False, "message": f"Update failed: {e}. Use the GitHub link to download manually."}
 
     # -- OpenSteamTool engine (required to apply Denuvo tickets) --------------
     def engine_status(self) -> dict:
