@@ -100,19 +100,44 @@ def _toml_points_at_stplugin(sp):
         return False
 
 
-def engine_status():
-    """Is a Denuvo-capable engine present AND configured?  Returns a status dict.
+def _proxy_is_engine(sp):
+    """True only if the dwmapi/xinput1_4 hijack proxies belong to a Denuvo engine
+    (official OpenSteamTool or the mktl fork) — i.e. they reference its core DLL.
 
-    `installed` = engine DLLs present.  `ready` additionally requires the toml to
-    point OST at config\\stplug-in (so an existing SteamTools library is read)."""
+    SteamTools uses the SAME proxy names but its DLLs don't reference OpenSteamTool/
+    mktl, so when SteamTools is the active engine these proxies are SteamTools' and
+    the registry ticket is never bridged (Denuvo 88500000 / code 00) even though
+    OpenSteamTool.dll is sitting right there. Checking the proxy bytes catches that."""
+    present = [d for d in ("dwmapi.dll", "xinput1_4.dll") if os.path.exists(os.path.join(sp, d))]
+    if not present:
+        return False
+    for d in present:
+        try:
+            with open(os.path.join(sp, d), "rb") as f:
+                data = f.read()
+        except OSError:
+            return False
+        if not (b"OpenSteamTool" in data or b"mktl" in data):
+            return False  # this proxy is SteamTools' / a stock DLL — OST isn't active
+    return True
+
+
+def engine_status():
+    """Is a Denuvo-capable engine present, ACTIVE, AND configured?  Returns a status dict.
+
+    `installed` = engine DLLs present.  `ready` additionally requires (a) the toml to
+    point OST at config\\stplug-in, and (b) the hijack proxies to actually be the
+    engine's — not SteamTools' (which would leave SteamTools active → code 00)."""
     sp = steam_path()
     if not sp:
-        return {"steam_path": None, "engine": None, "installed": False,
+        return {"steam_path": None, "engine": None, "installed": False, "proxy_ok": False,
                 "toml_ok": False, "ready": False, "steam_running": False}
     engine = next((c for c in ENGINE_CORES if os.path.exists(os.path.join(sp, c))), None)
     # The hijack proxies must also be there for the core to load.
     hijack = all(os.path.exists(os.path.join(sp, d)) for d in ("dwmapi.dll", "xinput1_4.dll"))
     installed = bool(engine and hijack)
+    # The hijack proxies must belong to OST/mktl, not SteamTools.
+    proxy_ok = _proxy_is_engine(sp)
     # The mktl fork reads config\stplug-in natively; only official OpenSteamTool
     # needs the toml redirect.
     toml_ok = True if engine == "mktl.dll" else _toml_points_at_stplugin(sp)
@@ -120,8 +145,9 @@ def engine_status():
         "steam_path": sp,
         "engine": engine,
         "installed": installed,
+        "proxy_ok": proxy_ok,
         "toml_ok": toml_ok,
-        "ready": installed and toml_ok,
+        "ready": installed and toml_ok and proxy_ok,
         "steam_running": _steam_running(),
     }
 
@@ -337,7 +363,10 @@ def install_ost(progress=_noop, fallback_zip=None, force=False):
     # hot-reloads the toml). Skipped on force (updates must replace the DLLs).
     dlls_present = (next((c for c in ENGINE_CORES if os.path.exists(os.path.join(sp, c))), None)
                     and all(os.path.exists(os.path.join(sp, d)) for d in ("dwmapi.dll", "xinput1_4.dll")))
-    if dlls_present and not force:
+    # Only take the fast config-only path when the proxies are genuinely OST/mktl's.
+    # If SteamTools owns them, fall through to a full install so OST's proxies
+    # OVERWRITE SteamTools' — that's the "switch to OpenSteamTool" fix.
+    if dlls_present and not force and _proxy_is_engine(sp):
         progress(50, "OpenSteamTool found — finishing setup…")
         _add_defender_exclusion(sp)
         progress(80, "Letting it read your existing library…")
