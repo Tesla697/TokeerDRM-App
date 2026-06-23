@@ -44,7 +44,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.6"                       # bump on every release
+APP_VERSION = "1.0.7"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -131,6 +131,24 @@ def _server_post(path: str, body: dict, timeout: int = 25) -> tuple[int, dict]:
     except Exception:
         data = {"reason": r.text[:200]}
     return r.status_code, data
+
+
+def _push_progress(pct, msg):
+    """Push a progress tick to the engine bar in the UI."""
+    try:
+        if WINDOW is not None:
+            WINDOW.evaluate_js(
+                f"window.__ostProgress && window.__ostProgress({int(pct)}, {json.dumps(msg)})")
+    except Exception:
+        pass
+
+
+def _pump_engine_progress():
+    """Relay the elevated helper's published progress to the UI bar (so it MOVES
+    during a UAC-elevated install/uninstall instead of freezing)."""
+    p = ost_setup.read_progress()
+    if p:
+        _push_progress(p[0], p[1])
 
 
 # ---------------------------------------------------------------------------
@@ -290,13 +308,12 @@ class Api:
         a UAC prompt and wait."""
         if not ost_setup.is_admin():
             try:
-                if WINDOW is not None:
-                    WINDOW.evaluate_js(
-                        "window.__ostProgress && window.__ostProgress(15, "
-                        "'Approve the Windows prompt to install…')")
-                ost_setup.relaunch_elevated("--install-engine")
+                ost_setup.clear_progress()
+                _push_progress(8, "Approve the Windows prompt to install…")
+                ost_setup.relaunch_elevated("--install-engine", on_progress=_pump_engine_progress)
             except Exception as e:
                 return {"ok": False, "message": f"Administrator approval is required: {e}"}
+            _push_progress(100, "Done")
             st = ost_setup.engine_status()
             if st.get("ready"):
                 return {"ok": True, "message": "OpenSteamTool ready. Sign in to Steam, then redeem."}
@@ -323,13 +340,12 @@ class Api:
         the engine even if it's already present). Elevates via UAC when needed."""
         if not ost_setup.is_admin():
             try:
-                if WINDOW is not None:
-                    WINDOW.evaluate_js(
-                        "window.__ostProgress && window.__ostProgress(15, "
-                        "'Approve the Windows prompt to update…')")
-                ost_setup.relaunch_elevated("--update-engine")
+                ost_setup.clear_progress()
+                _push_progress(8, "Approve the Windows prompt to update…")
+                ost_setup.relaunch_elevated("--update-engine", on_progress=_pump_engine_progress)
             except Exception as e:
                 return {"ok": False, "message": f"Administrator approval is required: {e}"}
+            _push_progress(100, "Done")
             st = ost_setup.engine_status()
             if st.get("ready"):
                 return {"ok": True, "message": "OpenSteamTool updated."}
@@ -355,9 +371,12 @@ class Api:
         """Remove OpenSteamTool. Needs admin → elevate via UAC when not already."""
         if not ost_setup.is_admin():
             try:
-                ost_setup.relaunch_elevated("--uninstall-engine")
+                ost_setup.clear_progress()
+                _push_progress(8, "Approve the Windows prompt to remove…")
+                ost_setup.relaunch_elevated("--uninstall-engine", on_progress=_pump_engine_progress)
             except Exception as e:
                 return {"ok": False, "message": f"Administrator approval is required: {e}"}
+            _push_progress(100, "Done")
             st = ost_setup.engine_status()
             if not st.get("installed"):
                 return {"ok": True, "message": "OpenSteamTool removed."}
@@ -572,21 +591,27 @@ if __name__ == "__main__":
     # already running as admin — do the install headless and exit (no window).
     if "--install-engine" in sys.argv:
         try:
-            ost_setup.install_ost()
+            ost_setup.install_ost(progress=ost_setup.write_progress)
         except Exception:
             pass
+        finally:
+            ost_setup.write_progress(100, "Done")
         sys.exit(0)
     if "--update-engine" in sys.argv:
         try:
-            ost_setup.install_ost(force=True)
+            ost_setup.install_ost(progress=ost_setup.write_progress, force=True)
         except Exception:
             pass
+        finally:
+            ost_setup.write_progress(100, "Done")
         sys.exit(0)
     if "--uninstall-engine" in sys.argv:
         try:
-            ost_setup.uninstall_ost()
+            ost_setup.uninstall_ost(progress=ost_setup.write_progress)
         except Exception:
             pass
+        finally:
+            ost_setup.write_progress(100, "Done")
         sys.exit(0)
 
     try:

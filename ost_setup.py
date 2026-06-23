@@ -74,6 +74,45 @@ def _noop(pct, msg):  # default progress sink
     pass
 
 
+# --- cross-process progress (UAC) ------------------------------------------
+# The elevated helper runs headless (no window), so it can't push progress to the
+# UI directly. It writes pct/msg to this file; the un-elevated UI instance polls it
+# while it waits, so the bar actually MOVES during an elevated install/uninstall
+# instead of freezing at the value it had when the UAC prompt appeared.
+def _progress_file():
+    # Prefer %PUBLIC% (same path no matter which account UAC elevates to) so the
+    # un-elevated UI and the elevated helper read/write the SAME file. Fall back to TEMP.
+    base = (os.environ.get("PUBLIC") or os.environ.get("TEMP")
+            or os.environ.get("TMP") or os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, "tokeerdrm_engine_progress.json")
+
+
+def write_progress(pct, msg):
+    """Called (as a progress sink) by the elevated helper to publish its progress."""
+    try:
+        with open(_progress_file(), "w", encoding="utf-8") as f:
+            json.dump({"pct": int(pct), "msg": str(msg)}, f)
+    except Exception:
+        pass
+
+
+def read_progress():
+    """(pct, msg) the elevated helper last published, or None."""
+    try:
+        with open(_progress_file(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return int(d.get("pct", 0)), str(d.get("msg", ""))
+    except Exception:
+        return None
+
+
+def clear_progress():
+    try:
+        os.remove(_progress_file())
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Steam location + engine detection
 # ---------------------------------------------------------------------------
@@ -348,10 +387,13 @@ def is_admin():
         return False
 
 
-def relaunch_elevated(flag="--install-engine", timeout_s=240):
+def relaunch_elevated(flag="--install-engine", timeout_s=240, on_progress=None):
     """Relaunch this program elevated (UAC prompt) with `flag`, and block until it
     finishes. Raises if the prompt is declined. The elevated instance handles the
-    flag in the app's __main__ (install/uninstall) headless and exits."""
+    flag in the app's __main__ (install/uninstall) headless and exits.
+
+    on_progress(): if given, called every ~250ms while we wait for the elevated
+    helper, so the caller can pump cross-process progress to the UI."""
     import ctypes
     from ctypes import wintypes
 
@@ -380,7 +422,20 @@ def relaunch_elevated(flag="--install-engine", timeout_s=240):
     if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(sei)):
         raise RuntimeError("Administrator approval was declined.")
     if sei.hProcess:
-        ctypes.windll.kernel32.WaitForSingleObject(sei.hProcess, int(timeout_s * 1000))
+        # Poll-wait so we can pump the elevated helper's progress to the UI instead of
+        # blocking opaquely. WAIT_TIMEOUT (0x102) = still running.
+        deadline = time.time() + timeout_s
+        while True:
+            r = ctypes.windll.kernel32.WaitForSingleObject(sei.hProcess, 250)
+            if r != 0x102:  # signalled / failed → done
+                break
+            if on_progress:
+                try:
+                    on_progress()
+                except Exception:
+                    pass
+            if time.time() > deadline:
+                break
         ctypes.windll.kernel32.CloseHandle(sei.hProcess)
 
 

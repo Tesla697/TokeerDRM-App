@@ -133,6 +133,13 @@ function initRedeem() {
       } else {
         setResult(out, "err", r.error || "Something went wrong.");
         toast(r.error || "Redeem failed", "err");
+        // Engine isn't set up → surface the repair/setup banner + lock redeem, and
+        // re-check the engine so the right action (install/finish/repair) is shown.
+        if (r.engine_fix) {
+          showEngineBanner(r.error);
+          setRedeemEnabled(false);
+          refreshEngine();
+        }
       }
     } catch (e) {
       setResult(out, "err", String(e));
@@ -250,6 +257,8 @@ function setEngineProgress(p, m) {
       const bar = $(bSel), pct = $(tSel);
       if (bar) bar.style.width = `${p}%`;
       if (pct) pct.textContent = `${p}%`;
+      // Tidy up once it's done so the bar doesn't linger at 100% (or a stuck value).
+      if (p >= 100) setTimeout(() => { prog.hidden = true; if (bar) bar.style.width = "0%"; }, 900);
     });
   if (m) { const bm = $("#engineBannerMsg"); if (bm) bm.textContent = m; }
 }
