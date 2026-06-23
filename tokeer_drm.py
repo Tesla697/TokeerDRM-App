@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 
 import requests
@@ -44,7 +45,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.9"                       # bump on every release
+APP_VERSION = "1.0.10"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -131,6 +132,31 @@ def _server_post(path: str, body: dict, timeout: int = 25) -> tuple[int, dict]:
     except Exception:
         data = {"reason": r.text[:200]}
     return r.status_code, data
+
+
+def _cleanup_update_leftovers():
+    """Delete the `<exe>.old` (and any stray `.new`) left by a self-update. Runs in the
+    background on startup: by now the previous process has exited and released its lock,
+    so the rename-swap's leftover gets removed reliably here instead of in the detached
+    helper, which can lose the race against the lingering PyInstaller bootloader."""
+    if not getattr(sys, "frozen", False):
+        return
+    targets = [sys.executable + ".old", sys.executable + ".new"]
+
+    def _worker():
+        for _ in range(30):  # ~30s of attempts while the old process finishes exiting
+            remaining = False
+            for t in targets:
+                if os.path.exists(t):
+                    try:
+                        os.remove(t)
+                    except OSError:
+                        remaining = True
+            if not remaining:
+                return
+            time.sleep(1)
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def _push_progress(pct, msg):
@@ -252,26 +278,16 @@ class Api:
             with open(bat, "w", encoding="ascii") as f:
                 f.write(
                     "@echo off\r\n"
+                    # Rename the running exe aside (NTFS allows it), drop the new build in,
+                    # launch it immediately. We try to delete .old here too, but if the
+                    # PyInstaller bootloader still holds it, the NEW app finishes the job on
+                    # startup (_cleanup_update_leftovers) so .old NEVER lingers.
                     f'del "{old_exe}" >nul 2>&1\r\n'
                     f'move /y "{cur_exe}" "{old_exe}" >nul 2>&1\r\n'
                     f'move /y "{new_exe}" "{cur_exe}" >nul 2>&1\r\n'
                     f'if not exist "{cur_exe}" move /y "{old_exe}" "{cur_exe}" >nul 2>&1\r\n'
                     f'start "" "{cur_exe}"\r\n'
-                    "set /a n=0\r\n"
-                    ":wait\r\n"
-                    f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul || goto cleanup\r\n'
-                    "ping -n 2 127.0.0.1 >nul\r\n"
-                    "goto wait\r\n"
-                    ":cleanup\r\n"
-                    f'if exist "{new_exe}" move /y "{new_exe}" "{cur_exe}" >nul 2>&1\r\n'
-                    f'del "{old_exe}" >nul 2>&1\r\n'
                     f'del "{new_exe}" >nul 2>&1\r\n'
-                    f'if not exist "{old_exe}" if not exist "{new_exe}" goto done\r\n'
-                    "set /a n+=1\r\n"
-                    "if %n% geq 30 goto done\r\n"
-                    "ping -n 2 127.0.0.1 >nul\r\n"
-                    "goto cleanup\r\n"
-                    ":done\r\n"
                     'del "%~f0"\r\n'
                 )
             DETACHED = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
@@ -583,6 +599,7 @@ def main() -> None:
         return
 
     global WINDOW
+    _cleanup_update_leftovers()  # remove a previous update's <exe>.old / .new
     api = Api()
     window = webview.create_window(
         APP_TITLE,

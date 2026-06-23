@@ -358,9 +358,20 @@ def ensure_engine():
     return {"action": "none", "status": st, "installed_tag": seen, "latest_tag": latest}
 
 
+def _ensure_stplugin_dir(sp):
+    """OST's toml points at config\\stplug-in (the SteamTools library). A user who never
+    had SteamTools won't have that folder, so OST's lua path would be missing. Create it
+    if absent (no-op if it already exists) so the redirect always resolves."""
+    try:
+        os.makedirs(os.path.join(sp, "config", "stplug-in"), exist_ok=True)
+    except OSError:
+        pass
+
+
 def _ensure_toml(sp):
     """Make sure OST reads config\\stplug-in WITHOUT clobbering an existing toml.
     Backs up any existing file, then merges the lua path. OST hot-reloads it."""
+    _ensure_stplugin_dir(sp)
     p = os.path.join(sp, "opensteamtool.toml")
     if not os.path.exists(p):
         with open(p, "w", encoding="utf-8") as f:
@@ -628,8 +639,9 @@ def install_ost(progress=_noop, fallback_zip=None, force=False):
     # showing another backend as active. This is the actual "switch to OST".
     _disable_foreign_engines(sp)
 
-    # Point OST at the existing stplug-in library.
+    # Point OST at the stplug-in library, creating it first if the user never had one.
     progress(85, "Configuring…")
+    _ensure_stplugin_dir(sp)
     try:
         with open(os.path.join(sp, "opensteamtool.toml"), "w", encoding="utf-8") as f:
             f.write(TOML)
