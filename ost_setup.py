@@ -113,6 +113,48 @@ def clear_progress():
         pass
 
 
+# The elevated helper runs headless and just sys.exit()s, so the un-elevated UI can't
+# see its return value. It writes the result dict here; the UI reads it after the helper
+# exits (e.g. to show the Defender -> LuaTools hint on a quarantine).
+def _result_file():
+    base = (os.environ.get("PUBLIC") or os.environ.get("TEMP")
+            or os.environ.get("TMP") or os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, "tokeerdrm_engine_result.json")
+
+
+def write_result(d):
+    try:
+        with open(_result_file(), "w", encoding="utf-8") as f:
+            json.dump(d, f)
+    except Exception:
+        pass
+
+
+def read_result():
+    try:
+        with open(_result_file(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def clear_result():
+    try:
+        os.remove(_result_file())
+    except OSError:
+        pass
+
+
+# Shown when Windows Defender (Tamper Protection) quarantines the PUA-flagged official
+# OpenSteamTool and our exclusion can't be added. LuaTools ships an unflagged build, so
+# we route the user there to install the engine, then they redeem here.
+LUATOOLS_HINT = ("Windows Defender (Tamper Protection) is blocking OpenSteamTool. "
+                 "Install the engine with LuaTools instead - open LuaTools, go to Mode, "
+                 "and Switch to OpenSteamTools - then come back here and redeem. "
+                 "Get LuaTools at lua.tools")
+LUATOOLS_URL = "https://lua.tools"
+
+
 # ---------------------------------------------------------------------------
 # Steam location + engine detection
 # ---------------------------------------------------------------------------
@@ -572,6 +614,14 @@ def install_ost(progress=_noop, fallback_zip=None, force=False):
         _start_steam(sp)
         return {"ok": False, "message": "Permission denied writing to Steam folder. "
                                         "Run TokeerDRM as Administrator and retry."}
+    except OSError as e:
+        # WinError 225 = "the file contains a virus or potentially unwanted software":
+        # Defender quarantined the PUA-flagged official OST and Tamper Protection blocked
+        # our exclusion. LuaTools ships an unflagged build — route the user there.
+        _start_steam(sp)
+        if getattr(e, "winerror", None) == 225 or "virus" in str(e).lower() or "unwanted" in str(e).lower():
+            return {"ok": False, "defender": True, "message": LUATOOLS_HINT, "url": LUATOOLS_URL}
+        return {"ok": False, "message": f"Couldn't install OpenSteamTool: {e}"}
 
     # Disable every competing engine (mktl fork, CloudRedirect, a SteamTools proxy…)
     # so the hijack DLLs only load OpenSteamTool.dll AND managers like LuaTools stop

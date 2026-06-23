@@ -269,15 +269,43 @@ async function runEngineAction(method, btn, okMsg) {
   let r = null;
   try {
     r = await call(method);
-    if (r && r.ok) toast(okMsg, "ok");
-    else toast((r && r.message) || "Failed", "err");
-    if ($("#ostResult")) setResult($("#ostResult"), r && r.ok ? "ok" : "err", (r && r.message) || "");
+    if (r && r.defender) {
+      // Defender (Tamper Protection) blocked the official OST → route to LuaTools.
+      handleDefenderBlock(r);
+    } else if (r && r.ok) {
+      toast(okMsg, "ok");
+      if ($("#ostResult")) setResult($("#ostResult"), "ok", r.message || "");
+    } else {
+      toast((r && r.message) || "Failed", "err");
+      if ($("#ostResult")) setResult($("#ostResult"), "err", (r && r.message) || "");
+    }
   } catch (e) {
     if ($("#ostResult")) setResult($("#ostResult"), "err", String(e));
   }
   loading(btn, false);
   setTimeout(refreshEngine, 1200);
   return r;
+}
+
+// Defender blocked the PUA-flagged official OST and Tamper Protection blocks the
+// auto-exclusion. LuaTools ships an unflagged build, so guide the user there with a
+// one-click link, then they redeem here.
+function handleDefenderBlock(r) {
+  const msg = (r && r.message) || "Windows Defender blocked OpenSteamTool. Install it via LuaTools.";
+  const url = (r && r.url) || "https://lua.tools";
+  toast("Defender blocked OST — use LuaTools", "err");
+  if ($("#ostResult")) setResult($("#ostResult"), "err", msg);
+  showEngineBanner(msg);
+  // Turn the banner button into "Open LuaTools". Clone it first to drop the old
+  // install-engine listener so it doesn't also try to reinstall.
+  const bbtn = $("#engineBtn");
+  if (bbtn && bbtn.parentNode) {
+    const fresh = bbtn.cloneNode(true);
+    bbtn.parentNode.replaceChild(fresh, bbtn);
+    const label = fresh.querySelector(".btn-label") || fresh;
+    label.textContent = "Open LuaTools";
+    fresh.addEventListener("click", () => call("open_url", url));
+  }
 }
 
 function initEngine() {

@@ -44,7 +44,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.8"                       # bump on every release
+APP_VERSION = "1.0.9"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -319,15 +319,19 @@ class Api:
         if not ost_setup.is_admin():
             try:
                 ost_setup.clear_progress()
+                ost_setup.clear_result()
                 _push_progress(8, "Approve the Windows prompt to install…")
                 ost_setup.relaunch_elevated("--install-engine", on_progress=_pump_engine_progress)
             except Exception as e:
                 return {"ok": False, "message": f"Administrator approval is required: {e}"}
             _push_progress(100, "Done")
+            res = ost_setup.read_result() or {}
+            if res.get("defender"):  # Defender blocked it → route to LuaTools
+                return res
             st = ost_setup.engine_status()
             if st.get("ready"):
                 return {"ok": True, "message": "OpenSteamTool ready. Sign in to Steam, then redeem."}
-            return {"ok": False, "message": "Setup didn't complete — was the prompt declined? Try again."}
+            return {"ok": False, "message": res.get("message") or "Setup didn't complete — was the prompt declined? Try again."}
 
         # Already elevated: install in-process with live progress.
         def progress(pct, msg):
@@ -351,15 +355,19 @@ class Api:
         if not ost_setup.is_admin():
             try:
                 ost_setup.clear_progress()
+                ost_setup.clear_result()
                 _push_progress(8, "Approve the Windows prompt to update…")
                 ost_setup.relaunch_elevated("--update-engine", on_progress=_pump_engine_progress)
             except Exception as e:
                 return {"ok": False, "message": f"Administrator approval is required: {e}"}
             _push_progress(100, "Done")
+            res = ost_setup.read_result() or {}
+            if res.get("defender"):
+                return res
             st = ost_setup.engine_status()
             if st.get("ready"):
                 return {"ok": True, "message": "OpenSteamTool updated."}
-            return {"ok": False, "message": "Update didn't complete — was the prompt declined? Try again."}
+            return {"ok": False, "message": res.get("message") or "Update didn't complete — was the prompt declined? Try again."}
 
         def progress(pct, msg):
             try:
@@ -601,25 +609,25 @@ if __name__ == "__main__":
     # already running as admin — do the install headless and exit (no window).
     if "--install-engine" in sys.argv:
         try:
-            ost_setup.install_ost(progress=ost_setup.write_progress)
-        except Exception:
-            pass
+            ost_setup.write_result(ost_setup.install_ost(progress=ost_setup.write_progress))
+        except Exception as exc:
+            ost_setup.write_result({"ok": False, "message": str(exc)})
         finally:
             ost_setup.write_progress(100, "Done")
         sys.exit(0)
     if "--update-engine" in sys.argv:
         try:
-            ost_setup.install_ost(progress=ost_setup.write_progress, force=True)
-        except Exception:
-            pass
+            ost_setup.write_result(ost_setup.install_ost(progress=ost_setup.write_progress, force=True))
+        except Exception as exc:
+            ost_setup.write_result({"ok": False, "message": str(exc)})
         finally:
             ost_setup.write_progress(100, "Done")
         sys.exit(0)
     if "--uninstall-engine" in sys.argv:
         try:
-            ost_setup.uninstall_ost(progress=ost_setup.write_progress)
-        except Exception:
-            pass
+            ost_setup.write_result(ost_setup.uninstall_ost(progress=ost_setup.write_progress))
+        except Exception as exc:
+            ost_setup.write_result({"ok": False, "message": str(exc)})
         finally:
             ost_setup.write_progress(100, "Done")
         sys.exit(0)
