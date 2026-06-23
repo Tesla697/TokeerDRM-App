@@ -44,7 +44,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.7"                       # bump on every release
+APP_VERSION = "1.0.8"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -236,32 +236,42 @@ class Api:
                             progress(10 + int(got * 85 / total), "Downloading update…")
 
             progress(98, "Restarting…")
-            # A detached helper waits for THIS process to exit, swaps the new build over
-            # the old one, relaunches it, and deletes itself.
+            # A detached helper swaps the new build in, relaunches it, and cleans up.
             #
-            # The move is RETRIED in a loop: a PyInstaller one-file exe runs as a parent
-            # bootloader + a child (os.getpid() is the child). After the child exits, the
-            # parent still holds the .exe locked for a moment, so a single `move` fails and
-            # leaves the ".new" behind with the old exe in place. Looping until the lock
-            # clears makes the swap reliable; once it succeeds there's a single, current
-            # exe (the old one is overwritten) which is then relaunched.
+            # Robust swap WITHOUT fighting the exe lock: NTFS lets you RENAME a running
+            # .exe (you just can't overwrite its bytes). So we rename the running exe aside
+            # (.old), drop the new build into its place, and launch it immediately — the
+            # new app is in place before the old one even exits, so a ".new" is NEVER left
+            # for the user to rename. After the old process exits we delete the .old (and,
+            # belt-and-suspenders, finish the swap if the rename somehow didn't take). The
+            # cleanup retries because a PyInstaller one-file exe is a parent bootloader +
+            # child, and the parent can hold the old file a moment after the child exits.
+            old_exe = cur_exe + ".old"
             pid = os.getpid()
             bat = os.path.join(tempfile.gettempdir(), f"tokeerdrm_update_{pid}.bat")
             with open(bat, "w", encoding="ascii") as f:
                 f.write(
                     "@echo off\r\n"
-                    ":wait\r\n"
-                    f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul && (ping -n 2 127.0.0.1 >nul & goto wait)\r\n'
-                    "set /a n=0\r\n"
-                    ":swap\r\n"
-                    f'move /y "{new_exe}" "{cur_exe}" >nul 2>&1 && goto run\r\n'
-                    "set /a n+=1\r\n"
-                    "if %n% geq 60 goto run\r\n"
-                    "ping -n 2 127.0.0.1 >nul\r\n"
-                    "goto swap\r\n"
-                    ":run\r\n"
+                    f'del "{old_exe}" >nul 2>&1\r\n'
+                    f'move /y "{cur_exe}" "{old_exe}" >nul 2>&1\r\n'
+                    f'move /y "{new_exe}" "{cur_exe}" >nul 2>&1\r\n'
+                    f'if not exist "{cur_exe}" move /y "{old_exe}" "{cur_exe}" >nul 2>&1\r\n'
                     f'start "" "{cur_exe}"\r\n'
+                    "set /a n=0\r\n"
+                    ":wait\r\n"
+                    f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul || goto cleanup\r\n'
+                    "ping -n 2 127.0.0.1 >nul\r\n"
+                    "goto wait\r\n"
+                    ":cleanup\r\n"
+                    f'if exist "{new_exe}" move /y "{new_exe}" "{cur_exe}" >nul 2>&1\r\n'
+                    f'del "{old_exe}" >nul 2>&1\r\n'
                     f'del "{new_exe}" >nul 2>&1\r\n'
+                    f'if not exist "{old_exe}" if not exist "{new_exe}" goto done\r\n'
+                    "set /a n+=1\r\n"
+                    "if %n% geq 30 goto done\r\n"
+                    "ping -n 2 127.0.0.1 >nul\r\n"
+                    "goto cleanup\r\n"
+                    ":done\r\n"
                     'del "%~f0"\r\n'
                 )
             DETACHED = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
