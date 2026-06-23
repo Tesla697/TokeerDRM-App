@@ -44,7 +44,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.5"                       # bump on every release
+APP_VERSION = "1.0.6"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -218,8 +218,15 @@ class Api:
                             progress(10 + int(got * 85 / total), "Downloading update…")
 
             progress(98, "Restarting…")
-            # A detached helper waits for THIS process to exit (so the exe unlocks),
-            # swaps the new build over the old one, relaunches it, and deletes itself.
+            # A detached helper waits for THIS process to exit, swaps the new build over
+            # the old one, relaunches it, and deletes itself.
+            #
+            # The move is RETRIED in a loop: a PyInstaller one-file exe runs as a parent
+            # bootloader + a child (os.getpid() is the child). After the child exits, the
+            # parent still holds the .exe locked for a moment, so a single `move` fails and
+            # leaves the ".new" behind with the old exe in place. Looping until the lock
+            # clears makes the swap reliable; once it succeeds there's a single, current
+            # exe (the old one is overwritten) which is then relaunched.
             pid = os.getpid()
             bat = os.path.join(tempfile.gettempdir(), f"tokeerdrm_update_{pid}.bat")
             with open(bat, "w", encoding="ascii") as f:
@@ -227,8 +234,16 @@ class Api:
                     "@echo off\r\n"
                     ":wait\r\n"
                     f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul && (ping -n 2 127.0.0.1 >nul & goto wait)\r\n'
-                    f'move /y "{new_exe}" "{cur_exe}" >nul\r\n'
+                    "set /a n=0\r\n"
+                    ":swap\r\n"
+                    f'move /y "{new_exe}" "{cur_exe}" >nul 2>&1 && goto run\r\n'
+                    "set /a n+=1\r\n"
+                    "if %n% geq 60 goto run\r\n"
+                    "ping -n 2 127.0.0.1 >nul\r\n"
+                    "goto swap\r\n"
+                    ":run\r\n"
                     f'start "" "{cur_exe}"\r\n'
+                    f'del "{new_exe}" >nul 2>&1\r\n'
                     'del "%~f0"\r\n'
                 )
             DETACHED = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
@@ -419,7 +434,21 @@ class Api:
         if len(code) != 6:
             return {"ok": False, "error": "Enter the 6-character code."}
 
-        # Note: the engine (OpenSteamTool) is checked once at app open, not here.
+        # Gate on the engine: a Denuvo ticket only applies when OpenSteamTool is active
+        # AND pointed at the library (toml → config\stplug-in). If it isn't, writing the
+        # ticket is wasted — block redeem and tell the UI to surface repair/setup, WITHOUT
+        # burning the one-use code on the server. (Fails open only if detection itself
+        # throws, so a detection glitch can't lock the user out.)
+        try:
+            st = ost_setup.engine_status()
+        except Exception:
+            st = None
+        if st is not None and not st.get("ready"):
+            msg = ("OpenSteamTool isn't set up yet — finish setup/repair on the Engine tab, then redeem."
+                   if st.get("installed")
+                   else "OpenSteamTool isn't installed — install it on the Engine tab, then redeem.")
+            return {"ok": False, "error": msg, "engine_fix": True, "engine": st}
+
         try:
             status, data = _server_post("/drm/redeem", {"code": code})
         except Exception as e:

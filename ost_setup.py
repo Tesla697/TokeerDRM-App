@@ -311,15 +311,21 @@ def _ensure_toml(sp):
 # Steam process control
 # ---------------------------------------------------------------------------
 
-def _shutdown_steam(sp):
+def _shutdown_steam(sp, progress=None, lo=0, hi=0):
+    """Ask Steam to close and wait for it. If a `progress` sink + lo/hi range are given,
+    tick the bar up while we wait so it doesn't freeze for the (up to 30s) close."""
     exe = os.path.join(sp, "steam.exe")
     try:
         subprocess.run([exe, "-shutdown"], timeout=20, creationflags=_NO_WINDOW)
     except Exception:
         pass
-    for _ in range(30):
+    for i in range(30):
         if not _steam_running():
+            if progress and hi > lo:
+                progress(hi, "Closing Steam…")
             return
+        if progress and hi > lo:
+            progress(min(hi, lo + i), "Closing Steam…")
         time.sleep(1)
     # hard kill anything still alive (steam + a stray SteamTools manager)
     for name in ("steam.exe", "SteamTools.exe"):
@@ -405,8 +411,22 @@ def _download_release_zip(progress):
     if not asset:
         raise RuntimeError("Could not find the OpenSteamTool Release zip on GitHub.")
     progress(20, f"Downloading {asset['name']}…")
+    # Stream the download so the progress bar actually MOVES (20→38%) instead of sitting
+    # frozen at 20% during a single blocking read of the whole zip.
     req = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "TokeerDRM"})
-    return urllib.request.urlopen(req, timeout=120).read()
+    resp = urllib.request.urlopen(req, timeout=120)
+    total = int(resp.headers.get("Content-Length") or 0)
+    buf = io.BytesIO()
+    got = 0
+    while True:
+        chunk = resp.read(65536)
+        if not chunk:
+            break
+        buf.write(chunk)
+        got += len(chunk)
+        if total:
+            progress(20 + int(got * 18 / total), f"Downloading {asset['name']}…")
+    return buf.getvalue()
 
 
 def install_ost(progress=_noop, fallback_zip=None, force=False):
@@ -467,7 +487,7 @@ def install_ost(progress=_noop, fallback_zip=None, force=False):
         return {"ok": False, "message": "OpenSteamTool zip was missing expected DLLs."}
 
     progress(55, "Closing Steam…")
-    _shutdown_steam(sp)
+    _shutdown_steam(sp, progress, lo=55, hi=64)
 
     # Back up the current engine so nothing is lost.
     progress(65, "Backing up current engine…")
@@ -532,7 +552,7 @@ def uninstall_ost(progress=_noop):
         return {"ok": False, "message": "Steam not found."}
 
     progress(20, "Closing Steam…")
-    _shutdown_steam(sp)
+    _shutdown_steam(sp, progress, lo=20, hi=49)
 
     progress(50, "Removing OpenSteamTool…")
     try:
