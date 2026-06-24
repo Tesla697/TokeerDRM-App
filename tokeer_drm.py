@@ -125,22 +125,6 @@ def _write_registry(app_id: str, appticket_hex: str, eticket_hex: str) -> None:
         winreg.CloseKey(key)
 
 
-def _write_ticket_lua(app_id: str, appticket_hex: str, eticket_hex: str) -> None:
-    """For '012' games (server flags write_lua): write the ticket into config\\stplug-in
-    via OST's setappticket/seteticket lua so OST serves it to the game's LIVE
-    RequestEncryptedAppTicket call (the registry alone only covers the passive ownership
-    read). Separate file so a wrong guess can't break the game's own lua."""
-    sp = ost_setup.steam_path()
-    if not sp:
-        return
-    d = os.path.join(sp, "config", "stplug-in")
-    os.makedirs(d, exist_ok=True)
-    with open(os.path.join(d, f"tokeerdrm_{app_id}.lua"), "w", encoding="utf-8") as f:
-        f.write(f"addappid({app_id})\n")
-        f.write(f'setappticket({app_id}, "{appticket_hex}")\n')
-        f.write(f'seteticket({app_id}, "{eticket_hex}")\n')
-
-
 def _server_post(path: str, body: dict, timeout: int = 25) -> tuple[int, dict]:
     r = requests.post(SERVER_URL.rstrip("/") + path, json=body, timeout=timeout)
     try:
@@ -536,13 +520,6 @@ class Api:
             _write_registry(app_id, appticket, eticket)
         except Exception as e:
             return {"ok": False, "error": f"Registry write failed: {e}"}
-
-        # 012 games: ALSO write the seteticket lua so OST serves the live encrypted-ticket call.
-        if data.get("write_lua"):
-            try:
-                _write_ticket_lua(app_id, appticket, eticket)
-            except Exception as e:
-                pass  # non-fatal; registry write already succeeded
 
         return {
             "ok": True,
