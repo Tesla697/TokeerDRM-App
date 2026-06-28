@@ -33,6 +33,25 @@
         </div>
       </header>
 
+      <!-- dll-fix banner: shown when original (unmodified) OpenSteamTool.dll is detected -->
+      <div class="engine-banner" id="dllBanner" hidden>
+        <div class="eb-row">
+          <span class="eb-icon">⚡</span>
+          <div class="eb-text">
+            <strong>Enhanced DLL needed</strong>
+            <span id="dllBannerMsg">Some games throw errors with the original OpenSteamTool. Install the enhanced version for full compatibility.</span>
+          </div>
+          <button class="btn small" id="dllFixBtn">
+            <span class="btn-label">Fix DLL</span>
+            <span class="spinner"></span>
+          </button>
+        </div>
+        <div class="eb-progress" id="dllProgress" hidden>
+          <div class="eb-track"><div class="eb-bar" id="dllBar"></div></div>
+          <span class="eb-pct" id="dllPct">0%</span>
+        </div>
+      </div>
+
       <!-- engine setup banner (shown only when OpenSteamTool isn't active) -->
       <div class="engine-banner" id="engineBanner" hidden>
         <div class="eb-row">

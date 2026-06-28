@@ -45,7 +45,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.11"                       # bump on every release
+APP_VERSION = "1.0.12"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -358,7 +358,7 @@ class Api:
             except Exception:
                 pass
         try:
-            return ost_setup.install_ost(
+            return ost_setup.install_ost_custom(
                 progress=progress,
                 fallback_zip=resource_path("OpenSteamTool-Release.zip"),
             )
@@ -393,7 +393,7 @@ class Api:
             except Exception:
                 pass
         try:
-            return ost_setup.install_ost(
+            return ost_setup.install_ost_custom(
                 progress=progress,
                 fallback_zip=resource_path("OpenSteamTool-Release.zip"),
                 force=True,
@@ -428,6 +428,43 @@ class Api:
         except Exception as e:
             return {"ok": False, "message": str(e)}
 
+    def dll_status(self) -> dict:
+        """Check whether our custom OpenSteamTool.dll is installed."""
+        try:
+            st = ost_setup.engine_status()
+            custom = ost_setup.custom_dll_installed(st.get("steam_path"))
+            return {
+                "custom_installed": custom,
+                "needs_fix": st.get("installed") and not custom,
+            }
+        except Exception as e:
+            return {"custom_installed": False, "needs_fix": False, "error": str(e)}
+
+    def fix_dll(self) -> dict:
+        """Replace the original OpenSteamTool.dll with our enhanced fork build."""
+        if not ost_setup.is_admin():
+            try:
+                ost_setup.clear_progress()
+                ost_setup.clear_result()
+                _push_progress(8, "Approve the Windows prompt to install the enhanced DLL…")
+                ost_setup.relaunch_elevated("--fix-dll", on_progress=_pump_engine_progress)
+            except Exception as e:
+                return {"ok": False, "message": f"Administrator approval is required: {e}"}
+            _push_progress(100, "Done")
+            return ost_setup.read_result() or {"ok": False, "message": "No result from elevated helper."}
+
+        def progress(pct, msg):
+            try:
+                if WINDOW is not None:
+                    WINDOW.evaluate_js(
+                        f"window.__dllProgress && window.__dllProgress({int(pct)}, {json.dumps(msg)})")
+            except Exception:
+                pass
+        try:
+            return ost_setup.install_custom_dll(progress=progress)
+        except Exception as e:
+            return {"ok": False, "message": str(e)}
+
     def app_name(self, app_id: str) -> dict:
         """Best-effort game name for nicer display (Steam store API)."""
         app_id = "".join(c for c in str(app_id) if c.isdigit())
@@ -451,13 +488,26 @@ class Api:
         if not app_id:
             return {"ok": False, "error": "Enter a Steam AppID."}
 
-        try:
-            tickets = _run_extract(app_id)
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+        # Steam's RequestEncryptedAppTicket is async; the first call sometimes returns
+        # before the response arrives (empty output). Retry up to 3× with a short pause.
+        tickets = None
+        last_err = None
+        for attempt in range(3):
+            try:
+                tickets = _run_extract(app_id)
+            except Exception as e:
+                last_err = str(e)
+                break  # hard error (exe missing etc.) — no point retrying
+            if tickets:
+                break
+            if attempt < 2:
+                time.sleep(1.5)
+
         if not tickets:
-            return {"ok": False, "error": f"This Steam account doesn't own app {app_id} (no ticket). "
-                                          f"Make sure Steam is running and signed in."}
+            return {"ok": False, "error": last_err or (
+                f"This Steam account doesn't own app {app_id} (no ticket). "
+                f"Make sure Steam is running and signed in."
+            )}
 
         try:
             status, data = _server_post("/drm/generate", {
@@ -624,9 +674,17 @@ def main() -> None:
 if __name__ == "__main__":
     # Elevated helper mode: relaunch_elevated_install() starts us with this flag,
     # already running as admin — do the install headless and exit (no window).
+    if "--fix-dll" in sys.argv:
+        try:
+            ost_setup.write_result(ost_setup.install_custom_dll(progress=ost_setup.write_progress))
+        except Exception as exc:
+            ost_setup.write_result({"ok": False, "message": str(exc)})
+        finally:
+            ost_setup.write_progress(100, "Done")
+        sys.exit(0)
     if "--install-engine" in sys.argv:
         try:
-            ost_setup.write_result(ost_setup.install_ost(progress=ost_setup.write_progress))
+            ost_setup.write_result(ost_setup.install_ost_custom(progress=ost_setup.write_progress))
         except Exception as exc:
             ost_setup.write_result({"ok": False, "message": str(exc)})
         finally:
@@ -634,7 +692,7 @@ if __name__ == "__main__":
         sys.exit(0)
     if "--update-engine" in sys.argv:
         try:
-            ost_setup.write_result(ost_setup.install_ost(progress=ost_setup.write_progress, force=True))
+            ost_setup.write_result(ost_setup.install_ost_custom(progress=ost_setup.write_progress, force=True))
         except Exception as exc:
             ost_setup.write_result({"ok": False, "message": str(exc)})
         finally:

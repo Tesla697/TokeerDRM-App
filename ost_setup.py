@@ -25,6 +25,9 @@ import subprocess
 import urllib.request
 
 OST_RELEASES_API = "https://api.github.com/repos/OpenSteam001/OpenSteamTool/releases/latest"
+CUSTOM_OST_REPO   = "Tesla697/OpenSteamTool"
+CUSTOM_OST_API    = f"https://api.github.com/repos/{CUSTOM_OST_REPO}/releases/latest"
+_CUSTOM_MARKER    = ".tokeer_ost_custom"
 OST_DLLS = ("dwmapi.dll", "xinput1_4.dll", "OpenSteamTool.dll")
 ENGINE_CORES = ("OpenSteamTool.dll", "mktl.dll")  # either = Denuvo-capable engine
 
@@ -714,6 +717,242 @@ def uninstall_ost(progress=_noop):
     return {"ok": True,
             "message": ("OpenSteamTool removed and your previous setup restored."
                         if restored else "OpenSteamTool removed.")}
+
+
+def install_ost_custom(progress=_noop, fallback_zip=None, force=False):
+    """Full OST install using our custom OpenSteamTool.dll as the core.
+    Proxy DLLs (dwmapi.dll, xinput1_4.dll) come from the official OST release;
+    the core (OpenSteamTool.dll) comes from our fork. Writes the custom marker.
+    Replaces install_ost() so the very first install already uses our DLL."""
+    sp = steam_path()
+    if not sp:
+        return {"ok": False, "message": "Steam not found. Install/run Steam first."}
+
+    dlls_present = (next((c for c in ENGINE_CORES if os.path.exists(os.path.join(sp, c))), None)
+                    and all(os.path.exists(os.path.join(sp, d)) for d in ("dwmapi.dll", "xinput1_4.dll")))
+    if dlls_present and not force and _proxy_is_engine(sp) and custom_dll_installed(sp):
+        progress(50, "Custom OpenSteamTool found — finishing setup…")
+        _add_defender_exclusion(sp)
+        _disable_foreign_engines(sp)
+        progress(80, "Letting it read your existing library…")
+        try:
+            _ensure_toml(sp)
+        except PermissionError:
+            return {"ok": False, "message": "Permission denied writing the OST config. Run as Administrator."}
+        _stamp_version(sp, latest_release_tag())
+        progress(100, "Ready.")
+        return {"ok": True, "message": "Custom OpenSteamTool configured — redeem your code."}
+
+    # Step 1: proxy DLLs from official OST release zip.
+    progress(5, "Downloading OpenSteamTool…")
+    try:
+        raw_official = _download_release_zip(progress)   # ticks progress 10→38
+    except Exception as e:
+        if fallback_zip and os.path.exists(fallback_zip):
+            progress(20, "Download failed — using bundled OpenSteamTool…")
+            with open(fallback_zip, "rb") as f:
+                raw_official = f.read()
+        else:
+            return {"ok": False, "message": f"Couldn't download OpenSteamTool: {e}"}
+
+    progress(38, "Extracting proxy DLLs…")
+    proxy_files = {}
+    with zipfile.ZipFile(io.BytesIO(raw_official)) as z:
+        for name in z.namelist():
+            base = os.path.basename(name)
+            if base in ("dwmapi.dll", "xinput1_4.dll"):
+                proxy_files[base] = z.read(name)
+    if not all(d in proxy_files for d in ("dwmapi.dll", "xinput1_4.dll")):
+        return {"ok": False, "message": "OpenSteamTool zip was missing expected proxy DLLs."}
+
+    # Step 2: our custom core DLL.
+    progress(42, "Downloading custom OpenSteamTool.dll…")
+    try:
+        req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
+        rel_data = json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
+    except Exception as e:
+        return {"ok": False, "message": f"Couldn't reach custom DLL release: {e}"}
+
+    asset = next((a for a in rel_data.get("assets", [])
+                  if a.get("name", "").lower() == "opensteamtool.dll"), None)
+    zip_asset = None if asset else next(
+        (a for a in rel_data.get("assets", [])
+         if "release" in a.get("name", "").lower() and a["name"].lower().endswith(".zip")), None)
+    if not asset and not zip_asset:
+        return {"ok": False, "message": "Custom DLL not found in the GitHub release assets."}
+
+    try:
+        url = (asset or zip_asset)["browser_download_url"]
+        req = urllib.request.Request(url, headers={"User-Agent": "TokeerDRM"})
+        resp = urllib.request.urlopen(req, timeout=120)
+        total = int(resp.headers.get("Content-Length") or 0)
+        buf = io.BytesIO()
+        got = 0
+        while True:
+            chunk = resp.read(65536)
+            if not chunk:
+                break
+            buf.write(chunk)
+            got += len(chunk)
+            if total:
+                progress(42 + int(got * 13 / total), "Downloading custom DLL…")
+        custom_raw = buf.getvalue()
+    except Exception as e:
+        return {"ok": False, "message": f"Couldn't download custom DLL: {e}"}
+
+    if zip_asset:
+        try:
+            with zipfile.ZipFile(io.BytesIO(custom_raw)) as z:
+                entry = next((n for n in z.namelist()
+                              if os.path.basename(n).lower() == "opensteamtool.dll"), None)
+                if not entry:
+                    return {"ok": False, "message": "OpenSteamTool.dll not found in the release zip."}
+                custom_raw = z.read(entry)
+        except Exception as e:
+            return {"ok": False, "message": f"Couldn't extract custom DLL from zip: {e}"}
+
+    progress(57, "Closing Steam…")
+    _shutdown_steam(sp, progress, lo=57, hi=66)
+
+    progress(67, "Backing up current engine…")
+    backup = os.path.join(sp, "tokeer-engine-backup")
+    os.makedirs(backup, exist_ok=True)
+    for f in ("dwmapi.dll", "xinput1_4.dll", "mktl.dll", "cloud_redirect.dll",
+              "hid.dll", "OpenSteamTool.dll", "opensteamtool.toml"):
+        src = os.path.join(sp, f)
+        if os.path.exists(src):
+            try:
+                with open(src, "rb") as a, open(os.path.join(backup, f), "wb") as b:
+                    b.write(a.read())
+            except Exception:
+                pass
+
+    progress(70, "Allowing OpenSteamTool in Windows Security…")
+    _add_defender_exclusion(sp)
+
+    progress(75, "Installing custom OpenSteamTool…")
+    try:
+        for fname, blob in proxy_files.items():
+            with open(os.path.join(sp, fname), "wb") as out:
+                out.write(blob)
+        with open(os.path.join(sp, "OpenSteamTool.dll"), "wb") as out:
+            out.write(custom_raw)
+        with open(os.path.join(sp, _CUSTOM_MARKER), "w", encoding="utf-8") as f:
+            f.write(rel_data.get("tag_name", "custom"))
+    except PermissionError:
+        _start_steam(sp)
+        return {"ok": False, "message": "Permission denied writing to Steam folder. Run as Administrator."}
+    except OSError as e:
+        _start_steam(sp)
+        if getattr(e, "winerror", None) == 225 or "virus" in str(e).lower():
+            return {"ok": False, "defender": True, "message": LUATOOLS_HINT, "url": LUATOOLS_URL}
+        return {"ok": False, "message": f"Couldn't install: {e}"}
+
+    _disable_foreign_engines(sp)
+    progress(85, "Configuring…")
+    _ensure_stplugin_dir(sp)
+    try:
+        with open(os.path.join(sp, "opensteamtool.toml"), "w", encoding="utf-8") as f:
+            f.write(TOML)
+    except Exception:
+        pass
+
+    progress(92, "Restarting Steam…")
+    _start_steam(sp)
+    _stamp_version(sp, latest_release_tag())
+    progress(100, "Custom OpenSteamTool installed.")
+    return {"ok": True, "message": "Custom OpenSteamTool installed. Sign in to Steam, then redeem your code."}
+
+
+def custom_dll_installed(sp=None):
+    """True if our custom OpenSteamTool.dll is installed (marker + DLL both present)."""
+    sp = sp or steam_path()
+    if not sp:
+        return False
+    return (os.path.exists(os.path.join(sp, _CUSTOM_MARKER))
+            and os.path.exists(os.path.join(sp, "OpenSteamTool.dll")))
+
+
+def install_custom_dll(progress=_noop):
+    """Download our fork's OpenSteamTool.dll and replace the official one.
+    Assumes the engine (proxy DLLs) is already installed — only swaps the core."""
+    sp = steam_path()
+    if not sp:
+        return {"ok": False, "message": "Steam not found."}
+
+    progress(8, "Finding latest custom OpenSteamTool release…")
+    try:
+        req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
+        data = json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
+    except Exception as e:
+        return {"ok": False, "message": f"Couldn't reach GitHub: {e}"}
+
+    # Try standalone .dll asset first, then a release zip.
+    asset = next((a for a in data.get("assets", [])
+                  if a.get("name", "").lower() == "opensteamtool.dll"), None)
+    zip_asset = None if asset else next(
+        (a for a in data.get("assets", [])
+         if "release" in a.get("name", "").lower() and a["name"].lower().endswith(".zip")), None)
+
+    if not asset and not zip_asset:
+        return {"ok": False, "message": "Custom DLL not found in the GitHub release assets."}
+
+    progress(15, "Downloading custom OpenSteamTool.dll…")
+    try:
+        url = (asset or zip_asset)["browser_download_url"]
+        req = urllib.request.Request(url, headers={"User-Agent": "TokeerDRM"})
+        resp = urllib.request.urlopen(req, timeout=120)
+        total = int(resp.headers.get("Content-Length") or 0)
+        buf = io.BytesIO()
+        got = 0
+        while True:
+            chunk = resp.read(65536)
+            if not chunk:
+                break
+            buf.write(chunk)
+            got += len(chunk)
+            if total:
+                progress(15 + int(got * 45 / total), "Downloading…")
+        raw = buf.getvalue()
+    except Exception as e:
+        return {"ok": False, "message": f"Couldn't download custom DLL: {e}"}
+
+    # Extract from zip if needed.
+    if zip_asset:
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                entry = next((n for n in z.namelist()
+                              if os.path.basename(n).lower() == "opensteamtool.dll"), None)
+                if not entry:
+                    return {"ok": False, "message": "opensteamtool.dll not found in the release zip."}
+                raw = z.read(entry)
+        except Exception as e:
+            return {"ok": False, "message": f"Couldn't extract DLL from zip: {e}"}
+
+    progress(62, "Closing Steam…")
+    _shutdown_steam(sp, progress, lo=62, hi=74)
+
+    progress(75, "Installing custom OpenSteamTool.dll…")
+    try:
+        _add_defender_exclusion(sp)
+        with open(os.path.join(sp, "OpenSteamTool.dll"), "wb") as f:
+            f.write(raw)
+        with open(os.path.join(sp, _CUSTOM_MARKER), "w", encoding="utf-8") as f:
+            f.write(data.get("tag_name", "custom"))
+    except PermissionError:
+        _start_steam(sp)
+        return {"ok": False, "message": "Permission denied writing to Steam folder. Run as Administrator."}
+    except OSError as e:
+        if getattr(e, "winerror", None) == 225 or "virus" in str(e).lower():
+            _start_steam(sp)
+            return {"ok": False, "defender": True, "message": LUATOOLS_HINT, "url": LUATOOLS_URL}
+        _start_steam(sp)
+        return {"ok": False, "message": f"Couldn't install custom DLL: {e}"}
+
+    progress(90, "Restarting Steam…")
+    _start_steam(sp)
+    progress(100, "Custom DLL installed.")
+    return {"ok": True, "message": "Enhanced DLL installed. Sign in to Steam, then launch your game."}
 
 
 if __name__ == "__main__":

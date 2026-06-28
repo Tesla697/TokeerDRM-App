@@ -322,6 +322,56 @@ function initEngine() {
   });
 }
 
+// ── DLL fix banner ────────────────────────────────────────────────────────────
+function showDllBanner(msg) {
+  if (msg) $("#dllBannerMsg").textContent = msg;
+  $("#dllBanner").hidden = false;
+}
+function hideDllBanner() { if ($("#dllBanner")) $("#dllBanner").hidden = true; }
+
+function setDllProgress(p, m) {
+  const prog = $("#dllProgress"); if (!prog) return;
+  prog.hidden = false;
+  const bar = $("#dllBar"), pct = $("#dllPct");
+  if (bar) bar.style.width = `${p}%`;
+  if (pct) pct.textContent = `${p}%`;
+  if (p >= 100) setTimeout(() => { prog.hidden = true; if (bar) bar.style.width = "0%"; }, 900);
+  if (m) { const bm = $("#dllBannerMsg"); if (bm) bm.textContent = m; }
+}
+
+async function checkDllStatus() {
+  try {
+    const s = await call("dll_status");
+    if (s && s.needs_fix) showDllBanner();
+    else hideDllBanner();
+  } catch {}
+}
+
+function initDllFix() {
+  window.__dllProgress = setDllProgress;
+  const btn = $("#dllFixBtn");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    loading(btn, true);
+    setDllProgress(0, "Starting…");
+    try {
+      const r = await call("fix_dll");
+      if (r && r.defender) {
+        handleDefenderBlock(r);
+      } else if (r && r.ok) {
+        toast("Enhanced DLL installed — Steam is restarting", "ok");
+        hideDllBanner();
+      } else {
+        toast((r && r.message) || "Fix failed", "err");
+        if (r && r.message) setDllProgress(0, r.message);
+      }
+    } catch (e) {
+      toast(String(e), "err");
+    }
+    loading(btn, false);
+  });
+}
+
 // ── force update ──────────────────────────────────────────────────────────────
 // Progress sink for the in-app updater (Python pushes here via __updProgress).
 function setUpdateProgress(p, m) {
@@ -364,9 +414,10 @@ whenReady(() => {
   initRedeem();
   initGenerate();
   initEngine();
+  initDllFix();
   setRedeemEnabled(false);  // lock redeem until the engine check confirms (refreshEngine flips it)
   checkUpdate();            // force-update gate
   refreshStatus();
-  refreshEngine();
+  refreshEngine().then(checkDllStatus);
   setInterval(refreshStatus, 15000);
 });
