@@ -140,6 +140,9 @@ function initRedeem() {
           setRedeemEnabled(false);
           refreshEngine();
         }
+        if (r.dll_fix) {
+          showDllBanner(r.error);
+        }
       }
     } catch (e) {
       setResult(out, "err", String(e));

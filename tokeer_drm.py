@@ -45,7 +45,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.12"                       # bump on every release
+APP_VERSION = "1.0.13"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -551,6 +551,16 @@ class Api:
                    if st.get("installed")
                    else "OpenSteamTool isn't installed — install it on the Engine tab, then redeem.")
             return {"ok": False, "error": msg, "engine_fix": True, "engine": st}
+
+        # Gate on custom DLL — don't burn a one-use code on a session that
+        # may give 012 because the original (unmodified) DLL is still active.
+        try:
+            ds = self.dll_status()
+        except Exception:
+            ds = None
+        if ds and ds.get("needs_fix"):
+            return {"ok": False, "dll_fix": True,
+                    "error": "The enhanced DLL is being installed — Steam is restarting. Once Steam is back, redeem your code."}
 
         try:
             status, data = _server_post("/drm/redeem", {"code": code})
