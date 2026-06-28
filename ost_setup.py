@@ -14,6 +14,7 @@ fails with Denuvo `88500000`. This module:
 Usable from the app (import) and standalone (`python ost_setup.py`).
 """
 
+import hashlib
 import io
 import os
 import re
@@ -838,7 +839,7 @@ def install_ost_custom(progress=_noop, fallback_zip=None, force=False):
         with open(os.path.join(sp, "OpenSteamTool.dll"), "wb") as out:
             out.write(custom_raw)
         with open(os.path.join(sp, _CUSTOM_MARKER), "w", encoding="utf-8") as f:
-            f.write(rel_data.get("tag_name", "custom"))
+            f.write(_marker_content(custom_raw, rel_data.get("tag_name", "")))
     except PermissionError:
         _start_steam(sp)
         return {"ok": False, "message": "Permission denied writing to Steam folder. Run as Administrator."}
@@ -864,13 +865,73 @@ def install_ost_custom(progress=_noop, fallback_zip=None, force=False):
     return {"ok": True, "message": "Custom OpenSteamTool installed. Sign in to Steam, then redeem your code."}
 
 
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _marker_content(raw: bytes, tag: str = "") -> str:
+    return f"{_sha256_bytes(raw)}:{len(raw)}:{tag}"
+
+
 def custom_dll_installed(sp=None):
-    """True if our custom OpenSteamTool.dll is installed (marker + DLL both present)."""
+    """True if our custom OpenSteamTool.dll is installed — exact hash match (fast path)
+    or installed DLL size matches any .dll asset in the tagged release (accepts both
+    Release and Debug builds without downloading anything)."""
     sp = sp or steam_path()
     if not sp:
         return False
-    return (os.path.exists(os.path.join(sp, _CUSTOM_MARKER))
-            and os.path.exists(os.path.join(sp, "OpenSteamTool.dll")))
+    marker_path = os.path.join(sp, _CUSTOM_MARKER)
+    dll_path    = os.path.join(sp, "OpenSteamTool.dll")
+    if not os.path.exists(marker_path) or not os.path.exists(dll_path):
+        return False
+    try:
+        with open(marker_path, "r", encoding="utf-8") as f:
+            stored = f.read().strip()
+        parts = stored.split(":")
+        stored_hash = parts[0] if parts else ""
+        stored_tag  = parts[2] if len(parts) >= 3 else ""
+        if len(stored_hash) != 64:
+            return False  # old/invalid marker — treat as not installed
+        with open(dll_path, "rb") as f:
+            dll_data = f.read()
+        if _sha256_bytes(dll_data) == stored_hash:
+            return True  # exact match — no network needed
+        # Hash mismatch (e.g. tester swapped in the Debug build). Accept if the
+        # installed DLL's size matches any .dll asset in the tagged release.
+        if stored_tag:
+            try:
+                tag_api = f"https://api.github.com/repos/{CUSTOM_OST_REPO}/releases/tags/{stored_tag}"
+                req = urllib.request.Request(tag_api, headers={"User-Agent": "TokeerDRM"})
+                assets = json.loads(urllib.request.urlopen(req, timeout=10).read().decode()).get("assets", [])
+                dll_sizes = {a["size"] for a in assets if a.get("name", "").lower().endswith(".dll")}
+                return len(dll_data) in dll_sizes
+            except Exception:
+                pass
+        return False
+    except Exception:
+        return False
+
+
+def custom_dll_needs_update(sp=None):
+    """True if our custom DLL is installed but an older release tag than what's on GitHub."""
+    sp = sp or steam_path()
+    if not sp:
+        return False
+    marker_path = os.path.join(sp, _CUSTOM_MARKER)
+    if not os.path.exists(marker_path):
+        return False
+    try:
+        with open(marker_path, "r", encoding="utf-8") as f:
+            stored = f.read().strip()
+        parts = stored.split(":")
+        stored_tag = parts[2] if len(parts) >= 3 else ""
+        if not stored_tag:
+            return False  # old marker without tag — can't determine version
+        req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
+        latest_tag = json.loads(urllib.request.urlopen(req, timeout=10).read().decode()).get("tag_name", "")
+        return bool(latest_tag) and latest_tag != stored_tag
+    except Exception:
+        return False
 
 
 def install_custom_dll(progress=_noop):
@@ -938,7 +999,7 @@ def install_custom_dll(progress=_noop):
         with open(os.path.join(sp, "OpenSteamTool.dll"), "wb") as f:
             f.write(raw)
         with open(os.path.join(sp, _CUSTOM_MARKER), "w", encoding="utf-8") as f:
-            f.write(data.get("tag_name", "custom"))
+            f.write(_marker_content(raw, data.get("tag_name", "")))
     except PermissionError:
         _start_steam(sp)
         return {"ok": False, "message": "Permission denied writing to Steam folder. Run as Administrator."}

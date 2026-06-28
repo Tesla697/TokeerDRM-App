@@ -429,16 +429,19 @@ class Api:
             return {"ok": False, "message": str(e)}
 
     def dll_status(self) -> dict:
-        """Check whether our custom OpenSteamTool.dll is installed."""
+        """Check whether our custom OpenSteamTool.dll is installed (and up to date)."""
         try:
             st = ost_setup.engine_status()
-            custom = ost_setup.custom_dll_installed(st.get("steam_path"))
+            sp = st.get("steam_path")
+            custom = ost_setup.custom_dll_installed(sp)
+            needs_update = custom and ost_setup.custom_dll_needs_update(sp)
             return {
                 "custom_installed": custom,
-                "needs_fix": st.get("installed") and not custom,
+                "needs_fix":    st.get("installed") and not custom,
+                "needs_update": needs_update,
             }
         except Exception as e:
-            return {"custom_installed": False, "needs_fix": False, "error": str(e)}
+            return {"custom_installed": False, "needs_fix": False, "needs_update": False, "error": str(e)}
 
     def fix_dll(self) -> dict:
         """Replace the original OpenSteamTool.dll with our enhanced fork build."""

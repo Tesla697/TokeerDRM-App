@@ -345,8 +345,15 @@ function setDllProgress(p, m) {
 async function checkDllStatus() {
   try {
     const s = await call("dll_status");
-    if (s && s.needs_fix) showDllBanner();
-    else hideDllBanner();
+    if (s && s.needs_fix) {
+      showDllBanner("Some games throw errors with the original OpenSteamTool. Click Fix to install the enhanced build.");
+    } else if (s && s.needs_update) {
+      showDllBanner("A newer version of the enhanced DLL is available. Click Update to upgrade.");
+      const lbl = $("#dllFixBtn .btn-label");
+      if (lbl) lbl.textContent = "Update DLL";
+    } else {
+      hideDllBanner();
+    }
   } catch {}
 }
 
