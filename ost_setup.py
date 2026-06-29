@@ -915,15 +915,37 @@ def custom_dll_installed(sp=None):
             dll_data = f.read()
         if _sha256_bytes(dll_data) == stored_hash:
             return True  # exact match — no network needed
-        # Hash mismatch (e.g. tester swapped in the Debug build). Accept if the
-        # installed DLL's size matches any .dll asset in the tagged release.
+        # Hash mismatch: the DLL was swapped (manual update or Debug/Release switch).
+        # Check latest release FIRST — if the installed DLL matches a newer release,
+        # rewrite the marker immediately so custom_dll_needs_update stays accurate.
+        # Only fall back to the stored_tag check if the DLL isn't from a newer release.
+        actual_size = len(dll_data)
+        try:
+            req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
+            latest = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+            latest_tag = latest.get("tag_name", "")
+            if latest_tag and latest_tag != stored_tag:
+                dll_sizes = {a["size"] for a in latest.get("assets", [])
+                             if a.get("name", "").lower().endswith(".dll")}
+                if actual_size in dll_sizes:
+                    try:
+                        with open(os.path.join(sp, _CUSTOM_MARKER), "w", encoding="utf-8") as f:
+                            f.write(_marker_content(dll_data, latest_tag))
+                    except Exception:
+                        pass
+                    return True
+        except Exception:
+            pass
+        # Not a newer release — check if it's a different build of the stored_tag
+        # (e.g. user swapped Release for Debug or vice versa).
         if stored_tag:
             try:
                 tag_api = f"https://api.github.com/repos/{CUSTOM_OST_REPO}/releases/tags/{stored_tag}"
                 req = urllib.request.Request(tag_api, headers={"User-Agent": "TokeerDRM"})
                 assets = json.loads(urllib.request.urlopen(req, timeout=10).read().decode()).get("assets", [])
                 dll_sizes = {a["size"] for a in assets if a.get("name", "").lower().endswith(".dll")}
-                return len(dll_data) in dll_sizes
+                if actual_size in dll_sizes:
+                    return True
             except Exception:
                 pass
         return False
