@@ -744,7 +744,26 @@ def install_ost_custom(progress=_noop, fallback_zip=None, force=False):
         progress(100, "Ready.")
         return {"ok": True, "message": "Custom OpenSteamTool configured — redeem your code."}
 
-    # Step 1: proxy DLLs from official OST release zip.
+    # Proxy DLLs are already present and belong to the engine — skip the official
+    # OST download and only fetch our custom core DLL. This avoids hitting the
+    # GitHub rate limit on the official repo when the user already has OST installed
+    # (e.g. via LuaTools) and just needs our DLL swapped in.
+    if dlls_present and not force and _proxy_is_engine(sp):
+        progress(5, "Proxy DLLs already present — downloading custom core only…")
+        result = install_custom_dll(progress)
+        if not result.get("ok"):
+            return result
+        progress(80, "Finishing setup…")
+        _add_defender_exclusion(sp)
+        _disable_foreign_engines(sp)
+        try:
+            _ensure_toml(sp)
+        except PermissionError:
+            return {"ok": False, "message": "Permission denied writing the OST config. Run as Administrator."}
+        _stamp_version(sp, latest_release_tag())
+        return {"ok": True, "message": "Custom OpenSteamTool installed — redeem your code."}
+
+    # Full install: proxy DLLs from official OST release zip.
     progress(5, "Downloading OpenSteamTool…")
     try:
         raw_official = _download_release_zip(progress)   # ticks progress 10→38
