@@ -45,7 +45,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.17"                       # bump on every release
+APP_VERSION = "1.0.18"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -264,32 +264,51 @@ class Api:
             progress(98, "Restarting…")
             # A detached helper swaps the new build in, relaunches it, and cleans up.
             #
-            # Robust swap WITHOUT fighting the exe lock: NTFS lets you RENAME a running
-            # .exe (you just can't overwrite its bytes). So we rename the running exe aside
-            # (.old), drop the new build into its place, and launch it immediately — the
-            # new app is in place before the old one even exits, so a ".new" is NEVER left
-            # for the user to rename. After the old process exits we delete the .old (and,
-            # belt-and-suspenders, finish the swap if the rename somehow didn't take). The
-            # cleanup retries because a PyInstaller one-file exe is a parent bootloader +
-            # child, and the parent can hold the old file a moment after the child exits.
+            # OneDrive/AV-safe swap: do NOT rename or overwrite the exe while it's still
+            # running. Renaming a running exe fails on OneDrive-synced folders and under
+            # some antivirus — the old approach then rolled the OLD build back, so "Update"
+            # appeared to do nothing and the user got re-prompted forever. Instead we WAIT
+            # for this process to fully exit (so the file unlocks), then overwrite the exe
+            # in place, retrying + verifying with `fc` until the bytes match the new build,
+            # then relaunch. The retry also covers the PyInstaller bootloader (parent) that
+            # can hold the file a moment after the child exits.
             old_exe = cur_exe + ".old"
             pid = os.getpid()
             bat = os.path.join(tempfile.gettempdir(), f"tokeerdrm_update_{pid}.bat")
+            lines = [
+                "@echo off",
+                f'set "CUR={cur_exe}"',
+                f'set "NEW={new_exe}"',
+                f'set "OLD={old_exe}"',
+                # 1) wait (~60s max) for the old process to exit so the exe unlocks
+                "set /a n=0",
+                ":waitloop",
+                f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul',
+                "if errorlevel 1 goto swap",
+                "set /a n+=1",
+                "if %n% geq 30 goto swap",
+                "ping -n 2 127.0.0.1 >nul",
+                "goto waitloop",
+                # 2) overwrite in place, retrying while OneDrive/AV/bootloader releases it;
+                #    fc confirms the swap actually took before we relaunch
+                ":swap",
+                "set /a m=0",
+                ":swaploop",
+                'copy /y "%NEW%" "%CUR%" >nul 2>&1',
+                'fc /b "%NEW%" "%CUR%" >nul 2>&1',
+                "if not errorlevel 1 goto done",
+                "set /a m+=1",
+                "if %m% geq 40 goto done",
+                "ping -n 2 127.0.0.1 >nul",
+                "goto swaploop",
+                ":done",
+                'start "" "%CUR%"',
+                'del "%NEW%" >nul 2>&1',
+                'del "%OLD%" >nul 2>&1',
+                'del "%~f0"',
+            ]
             with open(bat, "w", encoding="ascii") as f:
-                f.write(
-                    "@echo off\r\n"
-                    # Rename the running exe aside (NTFS allows it), drop the new build in,
-                    # launch it immediately. We try to delete .old here too, but if the
-                    # PyInstaller bootloader still holds it, the NEW app finishes the job on
-                    # startup (_cleanup_update_leftovers) so .old NEVER lingers.
-                    f'del "{old_exe}" >nul 2>&1\r\n'
-                    f'move /y "{cur_exe}" "{old_exe}" >nul 2>&1\r\n'
-                    f'move /y "{new_exe}" "{cur_exe}" >nul 2>&1\r\n'
-                    f'if not exist "{cur_exe}" move /y "{old_exe}" "{cur_exe}" >nul 2>&1\r\n'
-                    f'start "" "{cur_exe}"\r\n'
-                    f'del "{new_exe}" >nul 2>&1\r\n'
-                    'del "%~f0"\r\n'
-                )
+                f.write("\r\n".join(lines) + "\r\n")
             DETACHED = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
             subprocess.Popen(["cmd", "/c", bat], creationflags=DETACHED, close_fds=True)
 
