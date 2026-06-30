@@ -748,9 +748,11 @@ def install_ost_custom(progress=_noop, fallback_zip=None, force=False):
     # OST download and only fetch our custom core DLL. This avoids hitting the
     # GitHub rate limit on the official repo when the user already has OST installed
     # (e.g. via LuaTools) and just needs our DLL swapped in.
+    # NOTE: we defer Steam restart until AFTER _ensure_toml() so OST doesn't start
+    # and overwrite the toml before we configure the stplug-in path (race condition).
     if dlls_present and not force and _proxy_is_engine(sp):
         progress(5, "Proxy DLLs already present — downloading custom core only…")
-        result = install_custom_dll(progress)
+        result = install_custom_dll(progress, restart_steam=False)
         if not result.get("ok"):
             return result
         progress(80, "Finishing setup…")
@@ -761,6 +763,8 @@ def install_ost_custom(progress=_noop, fallback_zip=None, force=False):
         except PermissionError:
             return {"ok": False, "message": "Permission denied writing the OST config. Run as Administrator."}
         _stamp_version(sp, latest_release_tag())
+        progress(92, "Starting Steam…")
+        _start_steam(sp)
         return {"ok": True, "message": "Custom OpenSteamTool installed — redeem your code."}
 
     # Full install: proxy DLLs from official OST release zip.
@@ -892,92 +896,194 @@ def _marker_content(raw: bytes, tag: str = "") -> str:
     return f"{_sha256_bytes(raw)}:{len(raw)}:{tag}"
 
 
+def _write_marker(sp, raw, tag):
+    try:
+        with open(os.path.join(sp, _CUSTOM_MARKER), "w", encoding="utf-8") as f:
+            f.write(_marker_content(raw, tag))
+    except Exception:
+        pass
+
+
+def _hash_cache_file():
+    base = (os.environ.get("PUBLIC") or os.environ.get("TEMP")
+            or os.environ.get("TMP") or os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, "tokeerdrm_dll_hashes.json")
+
+
+def _read_hash_cache():
+    try:
+        with open(_hash_cache_file(), "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def _write_hash_cache(cache):
+    try:
+        with open(_hash_cache_file(), "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+    except Exception:
+        pass
+
+
+def _release_dll_hashes(rel_data):
+    """sha256 hex of every OpenSteamTool.dll in a release — taken from each asset's
+    `digest` field so NOTHING is downloaded. Returns a set (empty if GitHub didn't
+    populate digests for this release)."""
+    hashes = set()
+    for a in rel_data.get("assets", []):
+        if not a.get("name", "").lower().endswith(".dll"):
+            continue
+        dg = (a.get("digest") or "")
+        if dg.lower().startswith("sha256:"):
+            hashes.add(dg.split(":", 1)[1].strip().lower())
+    return hashes
+
+
+def _download_dll_hashes(rel_data):
+    """Fallback when a release has no digests: download each DLL (or the inner DLL of a
+    Release zip) once and hash it. Used only to seed the on-disk per-tag hash cache."""
+    hashes = set()
+    for a in rel_data.get("assets", []):
+        name = a.get("name", "").lower()
+        is_dll = name.endswith(".dll")
+        is_zip = name.endswith(".zip") and "release" in name
+        if not (is_dll or is_zip):
+            continue
+        try:
+            req = urllib.request.Request(a["browser_download_url"], headers={"User-Agent": "TokeerDRM"})
+            raw = urllib.request.urlopen(req, timeout=120).read()
+        except Exception:
+            continue
+        if is_zip:
+            try:
+                with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                    for n in z.namelist():
+                        if os.path.basename(n).lower() == "opensteamtool.dll":
+                            hashes.add(_sha256_bytes(z.read(n)))
+            except Exception:
+                pass
+        else:
+            hashes.add(_sha256_bytes(raw))
+    return hashes
+
+
+_latest_custom_cache = {"at": 0.0, "tag": "", "hashes": frozenset()}
+
+
+def _latest_custom_dll(timeout=10):
+    """(latest_tag, frozenset of sha256 hex) for OUR custom OpenSteamTool.dll release.
+    Hashes come from the GitHub asset `digest` field (no download). If GitHub didn't
+    populate digests, we download each DLL once and cache the hashes on disk by tag.
+    Cached ~10 min in-process. Returns ("", frozenset()) on total failure."""
+    now = time.time()
+    if _latest_custom_cache["tag"] and (now - _latest_custom_cache["at"]) < 600:
+        return _latest_custom_cache["tag"], _latest_custom_cache["hashes"]
+    try:
+        req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
+        data = json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
+    except Exception:
+        return _latest_custom_cache["tag"], _latest_custom_cache["hashes"]  # stale or empty
+    tag = data.get("tag_name", "") or ""
+    hashes = _release_dll_hashes(data)
+    if not hashes and tag:  # no digests — fall back to download+disk-cache (once per tag)
+        cache = _read_hash_cache()
+        if tag in cache:
+            hashes = set(cache[tag])
+        else:
+            hashes = _download_dll_hashes(data)
+            if hashes:
+                cache[tag] = sorted(hashes)
+                _write_hash_cache(cache)
+    if tag:
+        _latest_custom_cache.update(at=now, tag=tag, hashes=frozenset(hashes))
+    return tag, frozenset(hashes)
+
+
+def _installed_dll_hash(sp):
+    dll_path = os.path.join(sp, "OpenSteamTool.dll")
+    if not os.path.exists(dll_path):
+        return None, None
+    try:
+        with open(dll_path, "rb") as f:
+            data = f.read()
+        return data, _sha256_bytes(data)
+    except OSError:
+        return None, None
+
+
 def custom_dll_installed(sp=None):
-    """True if our custom OpenSteamTool.dll is installed — exact hash match (fast path)
-    or installed DLL size matches any .dll asset in the tagged release (accepts both
-    Release and Debug builds without downloading anything)."""
+    """True if the installed OpenSteamTool.dll is one of OUR custom builds — decided by
+    EXACT sha256, never by file size. Order:
+      1. marker records this exact DLL          → fast, no network
+      2. DLL hash ∈ latest release's DLL hashes  → yes (and refresh the marker)
+      3. DLL hash ∈ the marker's stored-tag release hashes → yes (an older custom build;
+         the UI will offer an Update)
+    Anything else (incl. a swapped/foreign DLL whose marker no longer matches) → False,
+    so the user is taken through Fix and ends up on the exact latest modified DLL."""
     sp = sp or steam_path()
     if not sp:
         return False
-    marker_path = os.path.join(sp, _CUSTOM_MARKER)
-    dll_path    = os.path.join(sp, "OpenSteamTool.dll")
-    if not os.path.exists(marker_path) or not os.path.exists(dll_path):
+    dll_data, dll_hash = _installed_dll_hash(sp)
+    if not dll_hash:
         return False
-    try:
-        with open(marker_path, "r", encoding="utf-8") as f:
-            stored = f.read().strip()
-        parts = stored.split(":")
-        stored_hash = parts[0] if parts else ""
-        stored_tag  = parts[2] if len(parts) >= 3 else ""
-        if len(stored_hash) != 64:
-            return False  # old/invalid marker — treat as not installed
-        with open(dll_path, "rb") as f:
-            dll_data = f.read()
-        if _sha256_bytes(dll_data) == stored_hash:
-            return True  # exact match — no network needed
-        # Hash mismatch: the DLL was swapped (manual update or Debug/Release switch).
-        # Check latest release FIRST — if the installed DLL matches a newer release,
-        # rewrite the marker immediately so custom_dll_needs_update stays accurate.
-        # Only fall back to the stored_tag check if the DLL isn't from a newer release.
-        actual_size = len(dll_data)
+
+    stored_hash, stored_tag = "", ""
+    marker_path = os.path.join(sp, _CUSTOM_MARKER)
+    if os.path.exists(marker_path):
         try:
-            req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
-            latest = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
-            latest_tag = latest.get("tag_name", "")
-            if latest_tag and latest_tag != stored_tag:
-                dll_sizes = {a["size"] for a in latest.get("assets", [])
-                             if a.get("name", "").lower().endswith(".dll")}
-                if actual_size in dll_sizes:
-                    try:
-                        with open(os.path.join(sp, _CUSTOM_MARKER), "w", encoding="utf-8") as f:
-                            f.write(_marker_content(dll_data, latest_tag))
-                    except Exception:
-                        pass
-                    return True
+            with open(marker_path, "r", encoding="utf-8") as f:
+                parts = f.read().strip().split(":")
+            stored_hash = parts[0] if parts else ""
+            stored_tag  = parts[2] if len(parts) >= 3 else ""
+        except OSError:
+            pass
+
+    # 1) Marker matches THIS exact DLL (offline-safe fast path).
+    if len(stored_hash) == 64 and dll_hash == stored_hash:
+        return True
+
+    # 2) Is it byte-identical to the current latest release DLL?
+    latest_tag, latest_hashes = _latest_custom_dll()
+    if dll_hash in latest_hashes:
+        _write_marker(sp, dll_data, latest_tag)  # keep the marker honest
+        return True
+
+    # 3) Is it an older-but-still-ours build (matches the stored tag's release)?
+    if stored_tag and stored_tag != latest_tag:
+        try:
+            tag_api = f"https://api.github.com/repos/{CUSTOM_OST_REPO}/releases/tags/{stored_tag}"
+            req = urllib.request.Request(tag_api, headers={"User-Agent": "TokeerDRM"})
+            rel = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+            if dll_hash in _release_dll_hashes(rel):
+                return True
         except Exception:
             pass
-        # Not a newer release — check if it's a different build of the stored_tag
-        # (e.g. user swapped Release for Debug or vice versa).
-        if stored_tag:
-            try:
-                tag_api = f"https://api.github.com/repos/{CUSTOM_OST_REPO}/releases/tags/{stored_tag}"
-                req = urllib.request.Request(tag_api, headers={"User-Agent": "TokeerDRM"})
-                assets = json.loads(urllib.request.urlopen(req, timeout=10).read().decode()).get("assets", [])
-                dll_sizes = {a["size"] for a in assets if a.get("name", "").lower().endswith(".dll")}
-                if actual_size in dll_sizes:
-                    return True
-            except Exception:
-                pass
-        return False
-    except Exception:
-        return False
+
+    return False
 
 
 def custom_dll_needs_update(sp=None):
-    """True if our custom DLL is installed but an older release tag than what's on GitHub."""
+    """True unless the installed DLL is byte-identical to the latest custom release DLL.
+    Hash-exact: ANY DLL that isn't the current modified build → update, so everyone
+    converges on the exact same DLL. If we can't reach GitHub (no latest hashes), we
+    don't nag."""
     sp = sp or steam_path()
     if not sp:
         return False
-    marker_path = os.path.join(sp, _CUSTOM_MARKER)
-    if not os.path.exists(marker_path):
+    _, dll_hash = _installed_dll_hash(sp)
+    if not dll_hash:
         return False
-    try:
-        with open(marker_path, "r", encoding="utf-8") as f:
-            stored = f.read().strip()
-        parts = stored.split(":")
-        stored_tag = parts[2] if len(parts) >= 3 else ""
-        if not stored_tag:
-            return False  # old marker without tag — can't determine version
-        req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
-        latest_tag = json.loads(urllib.request.urlopen(req, timeout=10).read().decode()).get("tag_name", "")
-        return bool(latest_tag) and latest_tag != stored_tag
-    except Exception:
-        return False
+    _, latest_hashes = _latest_custom_dll()
+    if not latest_hashes:
+        return False  # offline / API down → can't tell, don't nag
+    return dll_hash not in latest_hashes
 
 
-def install_custom_dll(progress=_noop):
+def install_custom_dll(progress=_noop, restart_steam=True):
     """Download our fork's OpenSteamTool.dll and replace the official one.
-    Assumes the engine (proxy DLLs) is already installed — only swaps the core."""
+    Assumes the engine (proxy DLLs) is already installed — only swaps the core.
+    restart_steam=False skips the post-install Steam launch (caller handles it)."""
     sp = steam_path()
     if not sp:
         return {"ok": False, "message": "Steam not found."}
@@ -1051,8 +1157,9 @@ def install_custom_dll(progress=_noop):
         _start_steam(sp)
         return {"ok": False, "message": f"Couldn't install custom DLL: {e}"}
 
-    progress(90, "Restarting Steam…")
-    _start_steam(sp)
+    if restart_steam:
+        progress(90, "Restarting Steam…")
+        _start_steam(sp)
     progress(100, "Custom DLL installed.")
     return {"ok": True, "message": "Enhanced DLL installed. Sign in to Steam, then launch your game."}
 

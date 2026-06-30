@@ -140,8 +140,11 @@ function initRedeem() {
           setRedeemEnabled(false);
           refreshEngine();
         }
+        // DLL is missing/old → don't just show a banner the user has to hunt for;
+        // actually kick off the install now (the message tells them Steam will restart).
         if (r.dll_fix) {
           showDllBanner(r.error);
+          if (!window.__engineBusy) { const b = $("#dllFixBtn"); if (b) b.click(); }
         }
       }
     } catch (e) {
@@ -267,6 +270,7 @@ function setEngineProgress(p, m) {
 }
 
 async function runEngineAction(method, btn, okMsg) {
+  window.__engineBusy = true;   // pause the live monitor while we install/repair
   loading(btn, true);
   setEngineProgress(0, "Starting…");
   let r = null;
@@ -286,6 +290,7 @@ async function runEngineAction(method, btn, okMsg) {
     if ($("#ostResult")) setResult($("#ostResult"), "err", String(e));
   }
   loading(btn, false);
+  window.__engineBusy = false;
   setTimeout(refreshEngine, 1200);
   return r;
 }
@@ -347,10 +352,12 @@ async function checkDllStatus() {
     const s = await call("dll_status");
     if (s && s.needs_fix) {
       showDllBanner("Some games throw errors with the original OpenSteamTool. Click Fix to install the enhanced build.");
+      setRedeemEnabled(false);   // wrong/foreign DLL — match the redeem gate
     } else if (s && s.needs_update) {
       showDllBanner("A newer version of the enhanced DLL is available. Click Update to upgrade.");
       const lbl = $("#dllFixBtn .btn-label");
       if (lbl) lbl.textContent = "Update DLL";
+      setRedeemEnabled(false);   // out-of-date DLL — match the redeem gate
     } else {
       hideDllBanner();
     }
@@ -362,6 +369,7 @@ function initDllFix() {
   const btn = $("#dllFixBtn");
   if (!btn) return;
   btn.addEventListener("click", async () => {
+    window.__engineBusy = true;   // pause the live monitor during the swap + Steam restart
     loading(btn, true);
     setDllProgress(0, "Starting…");
     try {
@@ -379,6 +387,8 @@ function initDllFix() {
       toast(String(e), "err");
     }
     loading(btn, false);
+    window.__engineBusy = false;
+    setTimeout(() => { refreshEngine().then(checkDllStatus); }, 1200);
   });
 }
 
@@ -395,6 +405,10 @@ function setUpdateProgress(p, m) {
 async function checkUpdate() {
   try {
     const v = await call("version_info");
+    // Always surface the running version in the footer (offline-safe: version_info
+    // returns `current` even when the GitHub check fails).
+    const ver = $("#appVersion");
+    if (ver && v && v.current) ver.textContent = "v" + v.current;
     if (v && v.update_required) {
       window.__updProgress = setUpdateProgress;
       $("#ugText").textContent =
@@ -430,4 +444,12 @@ whenReady(() => {
   refreshStatus();
   refreshEngine().then(checkDllStatus);
   setInterval(refreshStatus, 15000);
+  // Live re-check: a user can swap in a different/old OpenSteamTool.dll or remove the
+  // hijack proxies AFTER the app is open. Poll engine + DLL state so the banners and
+  // the redeem gate stay honest without needing a restart. Skips while an install/fix
+  // is running so it never fights an action in progress.
+  setInterval(() => {
+    if (window.__engineBusy) return;
+    refreshEngine().then(checkDllStatus);
+  }, 12000);
 });

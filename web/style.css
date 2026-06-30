@@ -230,6 +230,7 @@ html, body {
 
 /* ---- footer ---- */
 .foot { margin-top: 24px; text-align: center; font-size: 11px; color: var(--txt-faint); letter-spacing: .04em; }
+.foot .app-version { display: block; margin-top: 4px; opacity: .7; }
 
 /* ---- force-update gate ---- */
 .update-gate {

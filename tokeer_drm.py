@@ -45,7 +45,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.16"                       # bump on every release
+APP_VERSION = "1.0.17"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -344,6 +344,10 @@ class Api:
             res = ost_setup.read_result() or {}
             if res.get("defender"):  # Defender blocked it → route to LuaTools
                 return res
+            # Trust the elevated helper's success result — engine_status() can
+            # be transiently False right after a Steam restart (race window).
+            if res.get("ok"):
+                return {"ok": True, "message": res.get("message") or "OpenSteamTool ready. Sign in to Steam, then redeem."}
             st = ost_setup.engine_status()
             if st.get("ready"):
                 return {"ok": True, "message": "OpenSteamTool ready. Sign in to Steam, then redeem."}
@@ -555,15 +559,20 @@ class Api:
                    else "OpenSteamTool isn't installed — install it on the Engine tab, then redeem.")
             return {"ok": False, "error": msg, "engine_fix": True, "engine": st}
 
-        # Gate on custom DLL — don't burn a one-use code on a session that
-        # may give 012 because the original (unmodified) DLL is still active.
+        # Gate on custom DLL — don't burn a one-use code on a session that may give
+        # 005/012 because the wrong DLL is active. Block when the enhanced DLL is
+        # missing/foreign (needs_fix) OR an OLD build of ours (needs_update): both must
+        # be brought to the EXACT latest modified DLL before a ticket is worth writing.
         try:
             ds = self.dll_status()
         except Exception:
             ds = None
         if ds and ds.get("needs_fix"):
             return {"ok": False, "dll_fix": True,
-                    "error": "The enhanced DLL is being installed — Steam is restarting. Once Steam is back, redeem your code."}
+                    "error": "Installing the enhanced DLL — Steam will restart. Once it's back, redeem your code again."}
+        if ds and ds.get("needs_update"):
+            return {"ok": False, "dll_fix": True,
+                    "error": "Updating the enhanced DLL — Steam will restart. Once it's back, redeem your code again."}
 
         try:
             status, data = _server_post("/drm/redeem", {"code": code})
