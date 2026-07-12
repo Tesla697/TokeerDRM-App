@@ -45,7 +45,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.19"                       # bump on every release
+APP_VERSION = "1.0.20"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -261,18 +261,47 @@ class Api:
                         if total:
                             progress(10 + int(got * 85 / total), "Downloading update…")
 
-            progress(98, "Restarting…")
-            # A detached helper swaps the new build in, relaunches it, and cleans up.
-            #
-            # OneDrive/AV-safe swap: do NOT rename or overwrite the exe while it's still
-            # running. Renaming a running exe fails on OneDrive-synced folders and under
-            # some antivirus — the old approach then rolled the OLD build back, so "Update"
-            # appeared to do nothing and the user got re-prompted forever. Instead we WAIT
-            # for this process to fully exit (so the file unlocks), then overwrite the exe
-            # in place, retrying + verifying with `fc` until the bytes match the new build,
-            # then relaunch. The retry also covers the PyInstaller bootloader (parent) that
-            # can hold the file a moment after the child exits.
+            progress(98, "Installing update…")
             old_exe = cur_exe + ".old"
+
+            def _quit_soon():
+                def _q():
+                    import time as _t
+                    _t.sleep(1)  # let the UI show the message + the new process start
+                    try:
+                        if WINDOW is not None:
+                            WINDOW.destroy()
+                    except Exception:
+                        pass
+                    os._exit(0)
+                threading.Thread(target=_q, daemon=True).start()
+
+            # Preferred swap: RENAME in place. Windows lets you rename a *running* exe
+            # (the process keeps its handle to the renamed-away file), so there's no
+            # waiting and no AV-hostile "background cmd copying an .exe" — that copy
+            # approach was getting blocked/locked, leaving a stray <exe>.new the user
+            # had to rename by hand. The relaunched build deletes <exe>.old on startup
+            # via _cleanup_update_leftovers(), so no leftovers.
+            try:
+                if os.path.exists(old_exe):
+                    try:
+                        os.remove(old_exe)
+                    except OSError:
+                        pass
+                os.replace(cur_exe, old_exe)          # move the running exe aside
+                try:
+                    os.replace(new_exe, cur_exe)      # drop the new build into place
+                except OSError:
+                    os.replace(old_exe, cur_exe)      # roll back so the app isn't bricked
+                    raise
+                # DETACHED_PROCESS so the new app isn't tied to this dying one
+                subprocess.Popen([cur_exe], creationflags=0x00000008, close_fds=True)
+                _quit_soon()
+                return {"ok": True, "message": "Updating… TokeerDRM will restart automatically."}
+            except OSError:
+                pass  # rare (folder locked mid-sync/AV held the rename) — copy fallback below
+
+            # Fallback: detached helper waits for full exit, then overwrites in place.
             pid = os.getpid()
             bat = os.path.join(tempfile.gettempdir(), f"tokeerdrm_update_{pid}.bat")
             lines = [
@@ -280,7 +309,6 @@ class Api:
                 f'set "CUR={cur_exe}"',
                 f'set "NEW={new_exe}"',
                 f'set "OLD={old_exe}"',
-                # 1) wait (~60s max) for the old process to exit so the exe unlocks
                 "set /a n=0",
                 ":waitloop",
                 f'tasklist /fi "PID eq {pid}" 2>nul | find "{pid}" >nul',
@@ -289,8 +317,6 @@ class Api:
                 "if %n% geq 30 goto swap",
                 "ping -n 2 127.0.0.1 >nul",
                 "goto waitloop",
-                # 2) overwrite in place, retrying while OneDrive/AV/bootloader releases it;
-                #    fc confirms the swap actually took before we relaunch
                 ":swap",
                 "set /a m=0",
                 ":swaploop",
@@ -311,17 +337,7 @@ class Api:
                 f.write("\r\n".join(lines) + "\r\n")
             DETACHED = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
             subprocess.Popen(["cmd", "/c", bat], creationflags=DETACHED, close_fds=True)
-
-            def _quit():
-                import time as _t
-                _t.sleep(1)  # let the UI show "Restarting…" and the helper start polling
-                try:
-                    if WINDOW is not None:
-                        WINDOW.destroy()
-                except Exception:
-                    pass
-                os._exit(0)
-            threading.Thread(target=_quit, daemon=True).start()
+            _quit_soon()
             return {"ok": True, "message": "Updating… TokeerDRM will restart automatically."}
         except Exception as e:
             return {"ok": False, "message": f"Update failed: {e}. Use the GitHub link to download manually."}
