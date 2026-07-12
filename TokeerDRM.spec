@@ -35,7 +35,11 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX disabled: UPX-packed DLLs (esp. the bundled WebView2 loader) extracted from
+    # a onefile build to %TEMP% are a common trigger for AV false-positives / blocking
+    # on SOME machines, which shows up as a blank webview window. Slightly larger exe,
+    # far fewer "stuck on blank screen" reports.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,

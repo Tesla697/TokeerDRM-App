@@ -45,7 +45,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.18"                       # bump on every release
+APP_VERSION = "1.0.19"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -704,12 +704,45 @@ def main() -> None:
         easy_drag=False,
     )
     WINDOW = window
+
+    # Blank-screen watchdog: if WebView2 is broken/blocked on this machine, the window
+    # opens but the page never loads (just the dark background). Detect that and tell
+    # the user how to fix it, instead of leaving them staring at a blank window.
+    _loaded = {"ok": False}
+    try:
+        window.events.loaded += lambda *a: _loaded.__setitem__("ok", True)
+        window.events.closed += lambda *a: _loaded.__setitem__("ok", True)  # closed early = don't nag
+    except Exception:
+        _loaded["ok"] = True  # older pywebview without events — don't nag
+
+    def _blank_watchdog():
+        time.sleep(30)
+        if not _loaded["ok"]:
+            _msgbox(
+                "TokeerDRM — display problem",
+                "The window opened but the page never loaded (blank screen).\n\n"
+                "This means Microsoft Edge WebView2 is broken or blocked on this PC.\n\n"
+                "Fix:\n"
+                "1) Repair/reinstall WebView2:\n"
+                "   https://developer.microsoft.com/microsoft-edge/webview2/\n"
+                "2) Allow TokeerDRM in your antivirus (it may be blocking it),\n"
+                "then reopen TokeerDRM.",
+            )
+    threading.Thread(target=_blank_watchdog, daemon=True).start()
+
     # Force EdgeChromium (WebView2) so the modern CSS/animations render properly
-    # (the legacy MSHTML fallback can't). WebView2 ships with Windows 10/11.
+    # (the legacy MSHTML fallback can't render this UI — it would just be blank too).
     try:
         webview.start(gui="edgechromium", debug=False)
-    except Exception:
-        webview.start(debug=False)  # last-resort auto-select
+    except Exception as e:
+        _msgbox(
+            "TokeerDRM — display problem",
+            "The display engine (Microsoft Edge WebView2) failed to start.\n\n"
+            "Repair/reinstall WebView2 from\n"
+            "https://developer.microsoft.com/microsoft-edge/webview2/\n"
+            "then reopen TokeerDRM.\n\n"
+            f"(details: {e})",
+        )
 
 
 if __name__ == "__main__":
