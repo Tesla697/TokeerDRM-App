@@ -1,10 +1,10 @@
 """
 ost_setup.py — install / detect the OpenSteamTool engine.
 
-Denuvo DRM codes only work if a Denuvo-capable Steam unlock engine is active:
-official OpenSteamTool (`OpenSteamTool.dll`) or its `mktl.dll` fork. Plain Steam
-and vanilla SteamTools do NOT bridge the registry ticket, so a redeemed code
-fails with Denuvo `88500000`. This module:
+Denuvo DRM codes only work if official OpenSteamTool (`OpenSteamTool.dll`) is the
+active Steam unlock engine. Plain Steam, vanilla SteamTools and the internal
+`mktl.dll` fork do NOT bridge the registry ticket, so a redeemed code fails with
+Denuvo `88500000`. This module:
 
   • detects whether such an engine is present, and
   • installs the latest official OpenSteamTool (downloaded from GitHub) — backing
@@ -30,7 +30,7 @@ CUSTOM_OST_REPO   = "Tesla697/OpenSteamTool"
 CUSTOM_OST_API    = f"https://api.github.com/repos/{CUSTOM_OST_REPO}/releases/latest"
 _CUSTOM_MARKER    = ".tokeer_ost_custom"
 OST_DLLS = ("dwmapi.dll", "xinput1_4.dll", "OpenSteamTool.dll")
-ENGINE_CORES = ("OpenSteamTool.dll", "mktl.dll")  # either = Denuvo-capable engine
+ENGINE_CORES = ("OpenSteamTool.dll",)  # the only Denuvo-capable engine we support
 
 # Competing unlock engines we neutralise so OpenSteamTool is the ONLY one active
 # (this is what "switch to OST" really means, and what makes managers like LuaTools
@@ -39,9 +39,14 @@ ENGINE_CORES = ("OpenSteamTool.dll", "mktl.dll")  # either = Denuvo-capable engi
 #   • FOREIGN_PROXIES — proxy-hijack DLLs an engine might use to inject that AREN'T
 #     OST's (OST owns dwmapi.dll + xinput1_4.dll). Only disabled when their bytes tie
 #     them to a known unlocker, so a legitimate Steam DLL is never touched.
+# mktl.dll is an internal staff fork almost nobody runs. It used to count as a valid
+# engine here, which backfired: its proxies were accepted as "OST is active", but
+# install_custom_dll() always writes OpenSteamTool.dll — so on an mktl machine the
+# enhanced DLL landed in a file Steam never loaded. It's now purely foreign, so those
+# installs get repaired onto real OpenSteamTool instead.
 FOREIGN_CORES = ("mktl.dll", "cloud_redirect.dll")
 FOREIGN_PROXIES = ("hid.dll", "version.dll", "winhttp.dll")
-_OWN_MARKERS = (b"OpenSteamTool", b"mktl")
+_OWN_MARKERS = (b"OpenSteamTool",)
 # Bytes that positively identify a foreign unlocker's proxy/core. SteamTools' hid.dll
 # carries NO "SteamTools"/"stplug" string, so we fingerprint it by its update hosts
 # (update.steamui.com, stools.oss-cn-shanghai.aliyuncs.com) and its typo'd IPC class
@@ -205,13 +210,16 @@ def _toml_points_at_stplugin(sp):
 
 
 def _proxy_is_engine(sp):
-    """True only if the dwmapi/xinput1_4 hijack proxies belong to a Denuvo engine
-    (official OpenSteamTool or the mktl fork) — i.e. they reference its core DLL.
+    """True only if the dwmapi/xinput1_4 hijack proxies belong to official
+    OpenSteamTool — i.e. they reference OpenSteamTool.dll.
 
-    SteamTools uses the SAME proxy names but its DLLs don't reference OpenSteamTool/
-    mktl, so when SteamTools is the active engine these proxies are SteamTools' and
-    the registry ticket is never bridged (Denuvo 88500000 / code 00) even though
-    OpenSteamTool.dll is sitting right there. Checking the proxy bytes catches that."""
+    SteamTools uses the SAME proxy names but its DLLs don't reference OpenSteamTool,
+    so when SteamTools is the active engine these proxies are SteamTools' and the
+    registry ticket is never bridged (Denuvo 88500000 / code 00) even though
+    OpenSteamTool.dll is sitting right there. Checking the proxy bytes catches that.
+
+    An mktl-fork proxy fails here too, on purpose: it loads mktl.dll, which never
+    receives the enhanced DLL, so such installs must fall through to a full install."""
     present = [d for d in ("dwmapi.dll", "xinput1_4.dll") if os.path.exists(os.path.join(sp, d))]
     if not present:
         return False
@@ -221,8 +229,8 @@ def _proxy_is_engine(sp):
                 data = f.read()
         except OSError:
             return False
-        if not (b"OpenSteamTool" in data or b"mktl" in data):
-            return False  # this proxy is SteamTools' / a stock DLL — OST isn't active
+        if b"OpenSteamTool" not in data:
+            return False  # SteamTools' / mktl's / a stock DLL — OST isn't active
     return True
 
 
@@ -284,11 +292,9 @@ def engine_status():
     # The hijack proxies must also be there for the core to load.
     hijack = all(os.path.exists(os.path.join(sp, d)) for d in ("dwmapi.dll", "xinput1_4.dll"))
     installed = bool(engine and hijack)
-    # The hijack proxies must belong to OST/mktl, not SteamTools.
+    # The hijack proxies must belong to OpenSteamTool, not SteamTools/mktl.
     proxy_ok = _proxy_is_engine(sp)
-    # The mktl fork reads config\stplug-in natively; only official OpenSteamTool
-    # needs the toml redirect.
-    toml_ok = True if engine == "mktl.dll" else _toml_points_at_stplugin(sp)
+    toml_ok = _toml_points_at_stplugin(sp)
     return {
         "steam_path": sp,
         "engine": engine,
@@ -401,6 +407,214 @@ def _ensure_toml(sp):
         content = content.rstrip() + '\n\n[lua]\npaths = ["config/stplug-in"]\n'
     with open(p, "w", encoding="utf-8") as f:
         f.write(content)
+
+
+# ---------------------------------------------------------------------------
+# Steam Cloud saves (CloudRedirect)
+# ---------------------------------------------------------------------------
+# Steam refuses Cloud RPCs for apps the account doesn't own, so unlocked games
+# silently never persist their saves. OpenSteamTool can host CloudRedirect's
+# cloud_redirect.dll in-process (Hooks_NetPacket → CloudRedirectHost) and answer
+# those RPCs itself, which is the actual save fix.
+#
+# We install the DLL into <Steam>\opensteamtool\ rather than the Steam root on
+# purpose: managers like LuaTools decide which backend is "active" purely by
+# looking for <Steam>\cloud_redirect.dll, so a root copy makes them report
+# CloudRedirect as the active engine and nag the user to switch. A subfolder copy
+# (with [cloud].library pointing at it) gets the fix WITHOUT tripping that check —
+# which is why cloud_redirect.dll stays in FOREIGN_CORES above.
+#
+# No sign-in is needed: with no %APPDATA%\CloudRedirect\config.json the DLL runs
+# in local-only mode and stores saves on disk. Google Drive / OneDrive sync is an
+# optional extra the user sets up in CloudRedirect's own app.
+CLOUD_DLL = "cloud_redirect.dll"
+CLOUD_DIR = "opensteamtool"
+CLOUD_REL = CLOUD_DIR + "/" + CLOUD_DLL     # as written into the toml
+
+
+def _cloud_dll_dest(sp):
+    return os.path.join(sp, CLOUD_DIR, CLOUD_DLL)
+
+
+def _cloud_dll_source(sp):
+    """Find a cloud_redirect.dll we can install, or None.
+
+    Ordered most-trusted first: one we already installed, then copies our own
+    installer / _disable_foreign_engines set aside, then one bundled with the app."""
+    bundled = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))),
+                           CLOUD_DLL)
+    for c in (_cloud_dll_dest(sp),
+              os.path.join(sp, CLOUD_DLL),
+              os.path.join(sp, CLOUD_DLL + ".bak"),
+              os.path.join(sp, "tokeer-engine-backup", CLOUD_DLL),
+              bundled):
+        try:
+            # A truncated/placeholder file would just fail to load inside Steam, so
+            # require a plausible PE before we call cloud saves "available".
+            if os.path.exists(c) and os.path.getsize(c) > 200_000:
+                with open(c, "rb") as f:
+                    if f.read(2) == b"MZ":
+                        return c
+        except OSError:
+            continue
+    return None
+
+
+def _split_cloud_section(content):
+    """Split a toml into (everything except [cloud], the [cloud] body lines).
+
+    Done line-by-line rather than with a regex: section headers are trivially
+    recognisable, and a multiline/dotall regex here silently eats the newline after
+    "[cloud]" (producing "[cloud]enabled = true", which OST then ignores)."""
+    other, body, in_cloud = [], [], False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_cloud = stripped.lower() == "[cloud]"
+            if in_cloud:
+                continue          # drop the header; we re-emit it ourselves
+        (body if in_cloud else other).append(line)
+    return other, body
+
+
+def _active_core(sp):
+    """Which engine core the hijack proxies actually load, or None.
+
+    A leftover OpenSteamTool.dll often sits next to a foreign engine's proxy, but
+    Steam only ever loads the core the proxy names — so "is this feature supported?"
+    has to be answered against that DLL, not whichever one happens to be on disk.
+    Returns None when the proxies belong to something else (SteamTools, mktl)."""
+    seen_proxy = False
+    for proxy in ("xinput1_4.dll", "dwmapi.dll"):
+        try:
+            with open(os.path.join(sp, proxy), "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        seen_proxy = True
+        for core in ENGINE_CORES:
+            if core.encode() in data and os.path.exists(os.path.join(sp, core)):
+                return core
+    if seen_proxy:
+        return None  # a proxy is installed, but it doesn't load our engine
+    return next((c for c in ENGINE_CORES if os.path.exists(os.path.join(sp, c))), None)
+
+
+def _toml_cloud_enabled(content):
+    """True if the toml has [cloud] with enabled = true."""
+    _, body = _split_cloud_section(content)
+    return any(re.match(r'(?i)\s*enabled\s*=\s*true\s*$', l) for l in body)
+
+
+def cloud_status():
+    """Where Steam Cloud save redirection stands. Keys:
+        available — we have a cloud_redirect.dll to install
+        enabled   — toml says [cloud].enabled = true AND the DLL is in place
+        supported — the active engine actually contains the CloudRedirect host"""
+    sp = steam_path()
+    if not sp:
+        return {"steam_path": None, "available": False, "enabled": False,
+                "supported": False}
+
+    dll_ok = os.path.exists(_cloud_dll_dest(sp))
+    try:
+        with open(os.path.join(sp, "opensteamtool.toml"), "r",
+                  encoding="utf-8", errors="ignore") as f:
+            toml_on = _toml_cloud_enabled(f.read())
+    except OSError:
+        toml_on = False
+
+    # Older engine builds predate CloudRedirect entirely — enabling the config
+    # there would do nothing, so don't offer it. Test the core the proxies ACTUALLY
+    # load, not just the first one on disk: both OpenSteamTool.dll and mktl.dll are
+    # often present, and only the proxied one runs.
+    supported = False
+    core = _active_core(sp)
+    if core:
+        try:
+            with open(os.path.join(sp, core), "rb") as f:
+                supported = b"CR_InitCloudSave" in f.read()
+        except OSError:
+            pass
+
+    return {
+        "steam_path": sp,
+        "available": bool(_cloud_dll_source(sp)),
+        "enabled": bool(dll_ok and toml_on),
+        "supported": supported,
+    }
+
+
+def _ensure_cloud_toml(sp):
+    """Turn [cloud] on in opensteamtool.toml, preserving everything else."""
+    p = os.path.join(sp, "opensteamtool.toml")
+    try:
+        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+    except OSError:
+        content = TOML
+
+    # Lift out any existing [cloud] section, keep whatever settings we don't own
+    # (so a hand-tuned key survives), and re-emit the section fresh. Rebuilding it
+    # rather than patching in place keeps this idempotent.
+    other, body = _split_cloud_section(content)
+    keep = [l for l in body
+            if l.strip()
+            and not re.match(r'(?i)\s*(enabled|library)\s*=', l)]
+
+    block = ["[cloud]", "enabled = true", f'library = "{CLOUD_REL}"'] + keep
+    content = "\n".join(other).rstrip() + "\n\n" + "\n".join(block) + "\n"
+
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def enable_cloud(progress=_noop):
+    """Install cloud_redirect.dll next to OST and switch [cloud] on.
+
+    CloudRedirectHost::Initialize only runs at DLL attach, so the config is read
+    once when Steam starts — Steam has to be restarted for this to take effect."""
+    sp = steam_path()
+    if not sp:
+        return {"ok": False, "message": "Steam not found."}
+
+    src = _cloud_dll_source(sp)
+    if not src:
+        return {"ok": False, "message": "Cloud save support isn't available in this build."}
+
+    progress(20, "Enabling cloud saves…")
+    dest = _cloud_dll_dest(sp)
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if os.path.abspath(src) != os.path.abspath(dest):
+            with open(src, "rb") as a, open(dest, "wb") as b:
+                b.write(a.read())
+    except PermissionError:
+        return {"ok": False, "message": "Permission denied writing to the Steam folder. "
+                                        "Run TokeerDRM as Administrator and retry."}
+    except OSError as e:
+        return {"ok": False, "message": f"Couldn't install cloud saves: {e}"}
+
+    progress(50, "Configuring…")
+    try:
+        _ensure_cloud_toml(sp)
+    except PermissionError:
+        return {"ok": False, "message": "Permission denied writing the OST config. "
+                                        "Run TokeerDRM as Administrator."}
+    except Exception as e:
+        return {"ok": False, "message": f"Couldn't update the config: {e}"}
+
+    # Only bounce Steam if it's actually up; otherwise the next launch picks it up.
+    restarted = _steam_running()
+    if restarted:
+        progress(65, "Restarting Steam…")
+        _shutdown_steam(sp, progress, lo=65, hi=88)
+        _start_steam(sp)
+    progress(100, "Cloud saves enabled.")
+    return {"ok": True, "restarted": restarted,
+            "message": ("Cloud saves enabled — Steam is restarting. "
+                        "Once it's back, redeem your code.") if restarted else
+                       "Cloud saves enabled — they apply next time Steam starts."}
 
 
 # ---------------------------------------------------------------------------
@@ -552,13 +766,20 @@ def install_ost(progress=_noop, fallback_zip=None, force=False):
     if not sp:
         return {"ok": False, "message": "Steam not found. Install/run Steam first."}
 
+    # Read this BEFORE anything touches the toml — the full install path rewrites it
+    # from scratch and we need to restore [cloud] afterwards.
+    try:
+        was_cloud_enabled = cloud_status().get("enabled", False)
+    except Exception:
+        was_cloud_enabled = False
+
     # Config-only path: OST is already installed (e.g. the user set it up
     # manually) but the toml isn't pointing at config\stplug-in. Don't re-download
     # or restart Steam — just allow it in Defender and merge the lua path (OST
     # hot-reloads the toml). Skipped on force (updates must replace the DLLs).
     dlls_present = (next((c for c in ENGINE_CORES if os.path.exists(os.path.join(sp, c))), None)
                     and all(os.path.exists(os.path.join(sp, d)) for d in ("dwmapi.dll", "xinput1_4.dll")))
-    # Only take the fast config-only path when the proxies are genuinely OST/mktl's.
+    # Only take the fast config-only path when the proxies are genuinely OST's.
     # If SteamTools owns them, fall through to a full install so OST's proxies
     # OVERWRITE SteamTools' — that's the "switch to OpenSteamTool" fix.
     if dlls_present and not force and _proxy_is_engine(sp):
@@ -646,9 +867,13 @@ def install_ost(progress=_noop, fallback_zip=None, force=False):
     # Point OST at the stplug-in library, creating it first if the user never had one.
     progress(85, "Configuring…")
     _ensure_stplugin_dir(sp)
+    # This rewrites the toml from scratch, so remember whether cloud saves were on
+    # and put the section back — otherwise a repair/update silently turns them off.
     try:
         with open(os.path.join(sp, "opensteamtool.toml"), "w", encoding="utf-8") as f:
             f.write(TOML)
+        if was_cloud_enabled:
+            _ensure_cloud_toml(sp)
     except Exception:
         pass
 
@@ -678,7 +903,8 @@ def uninstall_ost(progress=_noop):
     progress(50, "Removing OpenSteamTool…")
     try:
         for f in ("OpenSteamTool.dll", "opensteamtool.toml", "opensteamtool.toml.tokeer.bak",
-                  "dwmapi.dll", "xinput1_4.dll", _VERSION_FILE):
+                  "dwmapi.dll", "xinput1_4.dll", _VERSION_FILE,
+                  os.path.join(CLOUD_DIR, CLOUD_DLL)):
             try:
                 os.remove(os.path.join(sp, f))
             except OSError:

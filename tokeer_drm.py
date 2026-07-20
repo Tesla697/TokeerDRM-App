@@ -45,7 +45,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.20"                       # bump on every release
+APP_VERSION = "1.0.21"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -344,7 +344,7 @@ class Api:
 
     # -- OpenSteamTool engine (required to apply Denuvo tickets) --------------
     def engine_status(self) -> dict:
-        """Is a Denuvo-capable engine (OpenSteamTool / mktl) active?"""
+        """Is the Denuvo-capable engine (OpenSteamTool) active?"""
         try:
             return ost_setup.engine_status()
         except Exception as e:
@@ -507,6 +507,42 @@ class Api:
         except Exception as e:
             return {"ok": False, "message": str(e)}
 
+    def cloud_status(self) -> dict:
+        """Whether Steam Cloud save redirection (CloudRedirect) is on. Drives the
+        mandatory enable prompt shown before redeeming."""
+        try:
+            return ost_setup.cloud_status()
+        except Exception as e:
+            # Fail open: if we can't tell, don't block redeem behind a cloud prompt.
+            return {"available": False, "enabled": False,
+                    "supported": False, "error": str(e)}
+
+    def enable_cloud(self) -> dict:
+        """Turn on cloud saves. Writes into the Steam folder → needs admin, so
+        elevate via UAC when we aren't already."""
+        if not ost_setup.is_admin():
+            try:
+                ost_setup.clear_progress()
+                ost_setup.clear_result()
+                _push_progress(8, "Approve the Windows prompt to enable cloud saves…")
+                ost_setup.relaunch_elevated("--enable-cloud", on_progress=_pump_engine_progress)
+            except Exception as e:
+                return {"ok": False, "message": f"Administrator approval is required: {e}"}
+            _push_progress(100, "Done")
+            return ost_setup.read_result() or {"ok": False, "message": "No result from elevated helper."}
+
+        def progress(pct, msg):
+            try:
+                if WINDOW is not None:
+                    WINDOW.evaluate_js(
+                        f"window.__ostProgress && window.__ostProgress({int(pct)}, {json.dumps(msg)})")
+            except Exception:
+                pass
+        try:
+            return ost_setup.enable_cloud(progress=progress)
+        except Exception as e:
+            return {"ok": False, "message": str(e)}
+
     def app_name(self, app_id: str) -> dict:
         """Best-effort game name for nicer display (Steam store API)."""
         app_id = "".join(c for c in str(app_id) if c.isdigit())
@@ -608,6 +644,20 @@ class Api:
         if ds and ds.get("needs_update"):
             return {"ok": False, "dll_fix": True,
                     "error": "Updating the enhanced DLL — Steam will restart. Once it's back, redeem your code again."}
+
+        # Gate on cloud saves — the user MUST enable them before a code applies.
+        # Only enforced where cloud saves can actually be delivered (the active engine
+        # supports CloudRedirect and we have the DLL). If they aren't supported on this
+        # machine we don't block, so the user is never permanently stuck. The UI shows
+        # the enable prompt; this is the backend backstop so it can't be skipped.
+        try:
+            cs = ost_setup.cloud_status()
+        except Exception:
+            cs = None
+        if cs and cs.get("supported") and cs.get("available") and not cs.get("enabled"):
+            return {"ok": False, "cloud_fix": True,
+                    "error": "Turn on cloud saves first so your game progress is protected — "
+                             "click Apply, choose Enable, then redeem once Steam is back."}
 
         try:
             status, data = _server_post("/drm/redeem", {"code": code})
@@ -783,6 +833,14 @@ if __name__ == "__main__":
     if "--update-engine" in sys.argv:
         try:
             ost_setup.write_result(ost_setup.install_ost_custom(progress=ost_setup.write_progress, force=True))
+        except Exception as exc:
+            ost_setup.write_result({"ok": False, "message": str(exc)})
+        finally:
+            ost_setup.write_progress(100, "Done")
+        sys.exit(0)
+    if "--enable-cloud" in sys.argv:
+        try:
+            ost_setup.write_result(ost_setup.enable_cloud(progress=ost_setup.write_progress))
         except Exception as exc:
             ost_setup.write_result({"ok": False, "message": str(exc)})
         finally:

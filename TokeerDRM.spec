@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 from PyInstaller.utils.hooks import copy_metadata
 
 datas = [('web', 'web'), ('app_icon.ico', '.')]
-binaries = [('extract_tickets.exe', '.')]
+binaries = [('extract_tickets.exe', '.'), ('cloud_redirect.dll', '.')]
 hiddenimports = ['appdirs']
 datas += copy_metadata('appdirs')
 tmp_ret = collect_all('webview')

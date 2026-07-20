@@ -188,6 +188,31 @@
     </div>
   </div>
 
+  <!-- cloud-saves gate: shown before applying a code when cloud saves are off -->
+  <div class="update-gate" id="cloudGate" hidden>
+    <div class="ug-card">
+      <div class="ug-icon">☁</div>
+      <h2>Enable cloud saves</h2>
+      <p>
+        Steam won't sync saves for unlocked games, so your progress can be lost.
+        This stores your saves through CloudRedirect — no sign-in needed. Enabling it
+        restarts Steam, then you can apply your code.
+      </p>
+      <div class="eb-progress" id="cloudProgress" hidden>
+        <div class="eb-track"><div class="eb-bar" id="cloudBar"></div></div>
+        <span class="eb-pct" id="cloudPct">0%</span>
+      </div>
+      <button class="btn primary" id="cloudEnableBtn">
+        <span class="btn-label">Enable cloud saves</span>
+        <span class="spinner"></span>
+      </button>
+      <button class="btn small" id="cloudCancelBtn">
+        <span class="btn-label">Not now — don't apply the code</span>
+      </button>
+      <p class="ug-note" id="cloudNote" hidden></p>
+    </div>
+  </div>
+
   <!-- toast -->
   <div class="toast-wrap" id="toastWrap"></div>
 

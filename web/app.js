@@ -117,6 +117,87 @@ function initGameName() {
   });
 }
 
+// ── cloud saves ───────────────────────────────────────────────────────────────
+// Unlocked games can't use Steam Cloud (Steam rejects Cloud RPCs for apps the
+// account doesn't own), so their saves never persist. Enabling cloud saves is
+// REQUIRED before a code applies: if the user declines, we don't let the redeem
+// through. Doing it now is also much better than after the ticket's 30-min window
+// has started, since enabling restarts Steam. Returns true only if redeem may go on.
+async function maybeOfferCloud(out) {
+  let s;
+  // If we can't read the status, don't trap the user behind a prompt — let redeem
+  // run (the backend applies the same fail-open rule).
+  try { s = await call("cloud_status"); } catch { return true; }
+  // Nothing to enforce when it isn't deliverable on this machine or already on.
+  if (!s || !s.available || !s.supported || s.enabled) return true;
+
+  const res = await showCloudGate();
+  if (res.proceed) return true;          // enabled with no restart → go straight to redeem
+  if (res.reason === "declined") {
+    setResult(out, "err", "Cloud saves are required — enable them to apply your code.");
+    toast("Enable cloud saves to continue", "err");
+  } else if (res.reason === "enabled") {
+    // Steam is restarting — the engine check would fail right now, so make the user
+    // click apply again once it's back rather than burning the code on a dead engine.
+    setResult(out, "ok", res.message || "Cloud saves enabled — apply your code once Steam is back.");
+    toast("Cloud saves enabled", "ok");
+  }
+  return false;
+}
+
+// In-app cloud-saves modal (replaces the native confirm(), which leaked the local
+// address in its title bar). Resolves to {proceed, reason, message, restarted}:
+//   reason "declined" — user chose not to enable → redeem is blocked
+//   reason "enabled"  — enabled OK; proceed is true only if Steam didn't need to bounce
+function showCloudGate() {
+  return new Promise((resolve) => {
+    const gate = $("#cloudGate"), enableBtn = $("#cloudEnableBtn"),
+          cancelBtn = $("#cloudCancelBtn"), note = $("#cloudNote"), prog = $("#cloudProgress");
+
+    note.hidden = true; note.textContent = "";
+    prog.hidden = true; { const b = $("#cloudBar"); if (b) b.style.width = "0%"; }
+    loading(enableBtn, false);
+    enableBtn.disabled = false; cancelBtn.disabled = false;
+    gate.hidden = false;
+
+    const close = (result) => {
+      gate.hidden = true;
+      enableBtn.onclick = null; cancelBtn.onclick = null;
+      resolve(result);
+    };
+
+    cancelBtn.onclick = () => close({ proceed: false, reason: "declined" });
+
+    enableBtn.onclick = async () => {
+      loading(enableBtn, true); cancelBtn.disabled = true;
+      note.hidden = true;
+      prog.hidden = false;
+      // Route the backend's progress ticks into the modal's bar for the duration.
+      const prev = window.__ostProgress;
+      window.__ostProgress = (pct) => {
+        const bar = $("#cloudBar"), pctEl = $("#cloudPct");
+        if (bar) bar.style.width = `${pct}%`;
+        if (pctEl) pctEl.textContent = `${pct}%`;
+      };
+      let r;
+      try { r = await call("enable_cloud"); }
+      catch (e) { r = { ok: false, message: String(e) }; }
+      window.__ostProgress = prev;
+      loading(enableBtn, false);
+
+      if (r && r.ok) {
+        close({ proceed: !r.restarted, reason: "enabled", message: r.message, restarted: r.restarted });
+      } else {
+        // Keep the modal open so the user can retry without losing their place.
+        prog.hidden = true;
+        note.hidden = false;
+        note.textContent = (r && r.message) || "Couldn't enable cloud saves. Try again.";
+        cancelBtn.disabled = false;
+      }
+    };
+  });
+}
+
 // ── redeem ────────────────────────────────────────────────────────────────────
 function initRedeem() {
   const btn = $("#applyBtn"), out = $("#redeemResult");
@@ -125,6 +206,7 @@ function initRedeem() {
     if (code.length !== 6) { setResult(out, "err", "Enter all 6 characters."); return; }
     clearResult(out); loading(btn, true);
     try {
+      if (!(await maybeOfferCloud(out))) { loading(btn, false); return; }
       const r = await call("redeem", code);
       if (r.ok) {
         setResult(out, "ok", `Ticket applied for app ${r.app_id}. Launch the game from Steam within 30 min.`);
@@ -145,6 +227,11 @@ function initRedeem() {
         if (r.dll_fix) {
           showDllBanner(r.error);
           if (!window.__engineBusy) { const b = $("#dllFixBtn"); if (b) b.click(); }
+        }
+        // Backend backstop: reached redeem with cloud saves still off (e.g. the
+        // prompt was bypassed). Re-run the same enable prompt now.
+        if (r.cloud_fix) {
+          await maybeOfferCloud(out);
         }
       }
     } catch (e) {

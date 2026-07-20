@@ -252,6 +252,8 @@ html, body {
 .ug-card h2 { font-size: 20px; font-weight: 800; margin-bottom: 10px; }
 .ug-card p { font-size: 13.5px; color: var(--txt-dim); line-height: 1.6; margin-bottom: 22px; }
 .ug-card .btn { width: 100%; }
+.ug-card .btn.small { margin-top: 10px; }
+.ug-note { font-size: 12.5px; color: var(--err); line-height: 1.5; margin: 14px 0 0; }
 
 /* ---- toast ---- */
 .toast-wrap { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 50; display: flex; flex-direction: column; gap: 10px; align-items: center; }
