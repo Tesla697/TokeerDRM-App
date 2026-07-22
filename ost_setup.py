@@ -288,6 +288,12 @@ def engine_status():
     if not sp:
         return {"steam_path": None, "engine": None, "installed": False, "proxy_ok": False,
                 "toml_ok": False, "ready": False, "steam_running": False}
+    # Auto-heal: strip any leftover cloud-save integration (it crashed users' Steam).
+    # Runs on every launch; cheap no-op once clean.
+    try:
+        disable_cloud(sp)
+    except Exception:
+        pass
     engine = next((c for c in ENGINE_CORES if os.path.exists(os.path.join(sp, c))), None)
     # The hijack proxies must also be there for the core to load.
     hijack = all(os.path.exists(os.path.join(sp, d)) for d in ("dwmapi.dll", "xinput1_4.dll"))
@@ -524,24 +530,15 @@ def cloud_status():
     except OSError:
         toml_on = False
 
-    # Older engine builds predate CloudRedirect entirely — enabling the config
-    # there would do nothing, so don't offer it. Test the core the proxies ACTUALLY
-    # load, not just the first one on disk: both OpenSteamTool.dll and mktl.dll are
-    # often present, and only the proxied one runs.
-    supported = False
-    core = _active_core(sp)
-    if core:
-        try:
-            with open(os.path.join(sp, core), "rb") as f:
-                supported = b"CR_InitCloudSave" in f.read()
-        except OSError:
-            pass
-
     return {
         "steam_path": sp,
-        "available": bool(_cloud_dll_source(sp)),
+        # DISABLED app-wide (2026-07): the bundled cloud_redirect.dll crashes current
+        # Steam builds when the engine loads it. Report unavailable/unsupported so the
+        # enable prompt and the redeem gate never fire again; `enabled` stays real so
+        # the auto-heal in engine_status() can detect and strip any leftover install.
+        "available": False,
+        "supported": False,
         "enabled": bool(dll_ok and toml_on),
-        "supported": supported,
     }
 
 
@@ -570,51 +567,59 @@ def _ensure_cloud_toml(sp):
 
 
 def enable_cloud(progress=_noop):
-    """Install cloud_redirect.dll next to OST and switch [cloud] on.
+    """DISABLED. Loading the bundled cloud_redirect.dll crashes current Steam builds,
+    so cloud saves are turned off app-wide. Kept as a stub so any lingering caller
+    gets a clean refusal instead of installing the crashing DLL."""
+    return {"ok": False, "message": "Cloud saves are temporarily disabled."}
 
-    CloudRedirectHost::Initialize only runs at DLL attach, so the config is read
-    once when Steam starts — Steam has to be restarted for this to take effect."""
-    sp = steam_path()
+
+_cloud_bounce_done = False  # only bounce Steam once per process to reclaim the dll
+
+
+def disable_cloud(sp=None, bounce_steam=True):
+    """Tear down the cloud-save integration so it can't crash Steam:
+      1. Strip the [cloud] section from the toml (the engine bails out before it ever
+         loads the DLL, so this alone stops the crash — and it works while Steam runs).
+      2. Delete the bundled cloud_redirect.dll. If Steam has it locked, close Steam,
+         delete it, and restart Steam — but at most ONCE per app run, so a stuck
+         delete can't turn into a Steam-restart loop.
+    Idempotent and cheap once clean. Returns {"ok", "changed"}."""
+    global _cloud_bounce_done
+    sp = sp or steam_path()
     if not sp:
-        return {"ok": False, "message": "Steam not found."}
+        return {"ok": False, "changed": False}
 
-    src = _cloud_dll_source(sp)
-    if not src:
-        return {"ok": False, "message": "Cloud save support isn't available in this build."}
-
-    progress(20, "Enabling cloud saves…")
-    dest = _cloud_dll_dest(sp)
+    changed = False
+    p = os.path.join(sp, "opensteamtool.toml")
     try:
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        if os.path.abspath(src) != os.path.abspath(dest):
-            with open(src, "rb") as a, open(dest, "wb") as b:
-                b.write(a.read())
-    except PermissionError:
-        return {"ok": False, "message": "Permission denied writing to the Steam folder. "
-                                        "Run TokeerDRM as Administrator and retry."}
-    except OSError as e:
-        return {"ok": False, "message": f"Couldn't install cloud saves: {e}"}
+        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+        if re.search(r'(?im)^\s*\[cloud\]\s*$', content):
+            other, _ = _split_cloud_section(content)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("\n".join(other).rstrip() + "\n")
+            changed = True
+    except OSError:
+        pass
 
-    progress(50, "Configuring…")
-    try:
-        _ensure_cloud_toml(sp)
-    except PermissionError:
-        return {"ok": False, "message": "Permission denied writing the OST config. "
-                                        "Run TokeerDRM as Administrator."}
-    except Exception as e:
-        return {"ok": False, "message": f"Couldn't update the config: {e}"}
+    dll = _cloud_dll_dest(sp)
+    if os.path.exists(dll):
+        try:
+            os.remove(dll)
+            changed = True
+        except OSError:
+            # Locked by a running Steam — bounce Steam once to reclaim + delete it.
+            if bounce_steam and not _cloud_bounce_done and _steam_running():
+                _cloud_bounce_done = True
+                _shutdown_steam(sp)
+                try:
+                    os.remove(dll)
+                    changed = True
+                except OSError:
+                    pass  # [cloud] is already stripped, so it won't load regardless
+                _start_steam(sp)
 
-    # Only bounce Steam if it's actually up; otherwise the next launch picks it up.
-    restarted = _steam_running()
-    if restarted:
-        progress(65, "Restarting Steam…")
-        _shutdown_steam(sp, progress, lo=65, hi=88)
-        _start_steam(sp)
-    progress(100, "Cloud saves enabled.")
-    return {"ok": True, "restarted": restarted,
-            "message": ("Cloud saves enabled — Steam is restarting. "
-                        "Once it's back, redeem your code.") if restarted else
-                       "Cloud saves enabled — they apply next time Steam starts."}
+    return {"ok": True, "changed": changed}
 
 
 # ---------------------------------------------------------------------------
@@ -766,13 +771,6 @@ def install_ost(progress=_noop, fallback_zip=None, force=False):
     if not sp:
         return {"ok": False, "message": "Steam not found. Install/run Steam first."}
 
-    # Read this BEFORE anything touches the toml — the full install path rewrites it
-    # from scratch and we need to restore [cloud] afterwards.
-    try:
-        was_cloud_enabled = cloud_status().get("enabled", False)
-    except Exception:
-        was_cloud_enabled = False
-
     # Config-only path: OST is already installed (e.g. the user set it up
     # manually) but the toml isn't pointing at config\stplug-in. Don't re-download
     # or restart Steam — just allow it in Defender and merge the lua path (OST
@@ -867,13 +865,11 @@ def install_ost(progress=_noop, fallback_zip=None, force=False):
     # Point OST at the stplug-in library, creating it first if the user never had one.
     progress(85, "Configuring…")
     _ensure_stplugin_dir(sp)
-    # This rewrites the toml from scratch, so remember whether cloud saves were on
-    # and put the section back — otherwise a repair/update silently turns them off.
+    # Write a clean toml with NO [cloud] section — cloud saves are disabled (they
+    # crashed Steam), so a repair/install must never carry the section back.
     try:
         with open(os.path.join(sp, "opensteamtool.toml"), "w", encoding="utf-8") as f:
             f.write(TOML)
-        if was_cloud_enabled:
-            _ensure_cloud_toml(sp)
     except Exception:
         pass
 
