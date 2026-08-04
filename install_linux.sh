@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+#
+# Tokeer Linux / Proton - one-time per-game setup.
+#
+#   curl -fsSL https://raw.githubusercontent.com/Tesla697/TokeerDRM-App/main/install_linux.sh | bash -s -- <APPID>
+#
+# It downloads + builds the native Denuvo hook, auto-writes the game's Steam
+# launch option (and points it at a Proton if it has none), installs the
+# `tokeer` command, and creates the Proton prefix. Run once per game. After it,
+# activation is a single command:   tokeer <CODE>
+#
+# Env overrides:
+#   TOKEER_DRM_SERVER   backend base URL (default https://luastools.xyz)
+#   TOKEER_BUNDLE_URL   bundle zip URL (default: latest GitHub release asset)
+#   TOKEER_HOME         install dir (default ~/.tokeer)
+#
+set -euo pipefail
+
+APPID="${1:-}"
+if ! [[ "$APPID" =~ ^[0-9]+$ ]]; then
+    echo "usage: install_linux.sh <APPID>    (numeric Steam AppID)" >&2
+    exit 1
+fi
+
+TDIR="${TOKEER_HOME:-$HOME/.tokeer}"
+SERVER="${TOKEER_DRM_SERVER:-https://luastools.xyz}"
+BUNDLE_URL="${TOKEER_BUNDLE_URL:-https://github.com/Tesla697/TokeerDRM-App/releases/latest/download/tokeer-linux.zip}"
+
+echo "== Tokeer Linux setup - app $APPID =="
+mkdir -p "$TDIR"
+
+# 1) Get the bundle (hook source + scripts). If we're launched from inside an
+#    already-unzipped bundle, use that instead of downloading.
+need=(ost_native_hook.c ost-run.sh build.sh tokeer_redeem_linux.py tokeer tokeer_steam_config.py tokeer_validate_linux.py)
+have_local=1
+for f in "${need[@]}"; do [ -f "./$f" ] || have_local=0; done
+if [ "$have_local" = 1 ]; then
+    echo "[1/6] using bundle from current directory"
+    cp -f "${need[@]}" "$TDIR"/
+    [ -f ./ost_native_hook.so ] && cp -f ./ost_native_hook.so "$TDIR"/ || true
+else
+    echo "[1/6] downloading bundle -> $BUNDLE_URL"
+    tmp="$(mktemp -d)"
+    curl -fsSL "$BUNDLE_URL" -o "$tmp/b.zip"
+    unzip -oq "$tmp/b.zip" -d "$tmp/x"
+    hookc="$(find "$tmp/x" -name ost_native_hook.c | head -1)"
+    [ -n "$hookc" ] || { echo "ERROR: bundle has no ost_native_hook.c" >&2; exit 1; }
+    cp -f "$(dirname "$hookc")"/* "$TDIR"/ 2>/dev/null || true
+    rm -rf "$tmp"
+fi
+
+# 2) Backend URL for the redeemer (read via server_config.py next to it).
+printf 'SERVER_URL = "%s"\n' "$SERVER" > "$TDIR/server_config.py"
+
+# 3) Native hook: use the prebuilt .so if shipped, else compile it.
+echo "[2/6] preparing native hook..."
+chmod +x "$TDIR/build.sh" "$TDIR/ost-run.sh" "$TDIR/tokeer" 2>/dev/null || true
+if [ -f "$TDIR/ost_native_hook.so" ]; then
+    echo "  using prebuilt ost_native_hook.so"
+elif command -v gcc >/dev/null 2>&1; then
+    ( cd "$TDIR" && ./build.sh )
+else
+    echo "ERROR: no prebuilt ost_native_hook.so and gcc is not installed." >&2
+    echo "  Steam Deck: 'sudo steamos-readonly disable' then install gcc, or ask staff" >&2
+    echo "  for the prebuilt ost_native_hook.so and drop it in $TDIR/." >&2
+    exit 1
+fi
+
+# 4) Install the `tokeer` command on PATH.
+mkdir -p "$HOME/.local/bin"
+ln -sf "$TDIR/tokeer" "$HOME/.local/bin/tokeer"
+echo "[3/6] installed 'tokeer' -> ~/.local/bin/tokeer"
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) : ;;
+    *) echo "  NOTE: ~/.local/bin is not on PATH - run activation as:  $TDIR/tokeer <CODE>" ;;
+esac
+
+# 5) Auto-write the Steam launch option (Steam must be closed while we edit).
+LAUNCH="WINEDLLOVERRIDES=\"dinput8=n,b\" $TDIR/ost-run.sh %command%"
+echo "[4/6] writing Steam launch options (Steam will restart)..."
+if pgrep -x steam >/dev/null 2>&1; then
+    steam -shutdown >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do pgrep -x steam >/dev/null 2>&1 || break; sleep 1; done
+fi
+python3 "$TDIR/tokeer_steam_config.py" "$APPID" "$LAUNCH"
+
+# 6) Create the Proton prefix by launching once (it fails Denuvo - expected -
+#    but that first run is what builds compatdata/<appid>/pfx).
+echo "[5/6] launching once to create the Proton prefix (first launch fails Denuvo - that's normal)..."
+( setsid steam "steam://rungameid/$APPID" >/dev/null 2>&1 & ) || \
+    ( setsid xdg-open "steam://rungameid/$APPID" >/dev/null 2>&1 & ) || true
+
+echo "[6/6] done."
+echo
+echo "Setup complete for app $APPID. When your code arrives, activate + launch with:"
+echo
+echo "    tokeer <CODE>"
+echo
+echo "(If the game is already open from this setup run, close it first, then run that.)"

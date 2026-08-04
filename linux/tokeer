@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#
+# tokeer <CODE> - redeem a Tokeer code into the game's Proton prefix and launch.
+#
+# One command per activation. Setup (install_linux.sh <APPID>) must have run once
+# for the game first - it sets the launch option so the launched game loads the
+# Denuvo hook. This just fetches the tickets for <CODE>, writes them into the
+# prefix, and starts the game through Steam.
+#
+set -euo pipefail
+
+TDIR="${TOKEER_HOME:-$HOME/.tokeer}"
+
+if [ $# -lt 1 ]; then
+    echo "usage: tokeer verify <APPID>     # check your setup, print a code to paste in the ticket"
+    echo "       tokeer <CODE>             # activate + launch"
+    echo "       tokeer <CODE> --no-launch # write the ticket only"
+    exit 1
+fi
+
+# `tokeer verify <APPID>` -> run the setup validator and print the TLX1. code.
+if [ "$1" = "verify" ]; then
+    shift
+    if [ ! -f "$TDIR/tokeer_validate_linux.py" ]; then
+        echo "ERROR: validator missing. Re-run install_linux.sh <APPID>." >&2
+        exit 1
+    fi
+    exec python3 "$TDIR/tokeer_validate_linux.py" "$@"
+fi
+
+if [ ! -f "$TDIR/tokeer_redeem_linux.py" ]; then
+    echo "ERROR: Tokeer isn't installed. Run install_linux.sh <APPID> first." >&2
+    exit 1
+fi
+
+exec python3 "$TDIR/tokeer_redeem_linux.py" "$@"
