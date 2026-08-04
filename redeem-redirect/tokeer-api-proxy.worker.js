@@ -19,11 +19,20 @@
  *      A JSON error like {"success":false,...} means the proxy reached the
  *      origin (good). A Cloudflare 5xx HTML page means the route/origin is off.
  *
- * The origin stays HTTP on its LAN port; only this worker knows the address.
- * Keep ORIGIN in sync with server_config.py if the box ever moves.
+ * ORIGIN must be a HOSTNAME, not a raw IP: a Worker fetch() to http://<ip>:port
+ * is rejected by Cloudflare with "error code: 1003". So front the code-store box
+ * with a Cloudflare hostname and point ORIGIN at that:
+ *   a. DNS -> add an A record  api  ->  31.57.38.79  (Proxied / orange cloud).
+ *   b. Rules -> Origin Rules -> Create: if hostname eq `api.luastools.xyz`,
+ *      set Origin Port = 8091  (the box listens on 8091).
+ *   c. SSL/TLS -> Overview -> set to "Flexible" (the box speaks plain HTTP on
+ *      8091, so Cloudflare must connect to the origin over HTTP). luastools.xyz
+ *      is Workers-only otherwise, so Flexible is safe zone-wide here.
+ * Then this Worker fetches https://api.luastools.xyz on 443 (allowed) and
+ * Cloudflare reaches the box on :8091. The real IP stays hidden behind the proxy.
  */
 
-const ORIGIN = "http://31.57.38.79:8091";
+const ORIGIN = "https://api.luastools.xyz";
 
 // Only these path prefixes are allowed through, so the proxy can never be used
 // as an open relay to arbitrary origin paths.
