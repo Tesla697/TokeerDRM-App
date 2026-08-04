@@ -22,17 +22,19 @@
  * ORIGIN must be a HOSTNAME, not a raw IP: a Worker fetch() to http://<ip>:port
  * is rejected by Cloudflare with "error code: 1003". So front the code-store box
  * with a Cloudflare hostname and point ORIGIN at that:
- *   a. DNS -> add an A record  api  ->  31.57.38.79  (Proxied / orange cloud).
- *   b. Rules -> Origin Rules -> Create: if hostname eq `api.luastools.xyz`,
+ *   a. DNS -> add an A record  codestore  ->  31.57.38.79 (Proxied / orange cloud).
+ *   b. Rules -> Origin Rules -> Create: if hostname eq `codestore.luastools.xyz`,
  *      set Origin Port = 8091  (the box listens on 8091).
  *   c. SSL/TLS -> Overview -> set to "Flexible" (the box speaks plain HTTP on
  *      8091, so Cloudflare must connect to the origin over HTTP). luastools.xyz
  *      is Workers-only otherwise, so Flexible is safe zone-wide here.
- * Then this Worker fetches https://api.luastools.xyz on 443 (allowed) and
+ * Then this Worker fetches https://codestore.luastools.xyz on 443 (allowed) and
  * Cloudflare reaches the box on :8091. The real IP stays hidden behind the proxy.
+ * (`api` already had a CNAME, so we use `codestore`; any free name works as long
+ *  as ORIGIN, the DNS record, and the Origin Rule all use the same one.)
  */
 
-const ORIGIN = "https://api.luastools.xyz";
+const ORIGIN = "https://codestore.luastools.xyz";
 
 // Only these path prefixes are allowed through, so the proxy can never be used
 // as an open relay to arbitrary origin paths.
