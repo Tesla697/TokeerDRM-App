@@ -1,0 +1,9 @@
+# Linux/Proton bundle scripts MUST stay LF - install_linux.sh is fetched raw and
+# piped to bash, and the shell/python run on Linux; CRLF would break them.
+install_linux.sh          text eol=lf
+linux/tokeer              text eol=lf
+linux/*.py                text eol=lf
+linux/*.sh                text eol=lf
+tokeer_redeem_linux.py    text eol=lf
+README_LINUX.md           text eol=lf
+redeem-redirect/*.js      text eol=lf
