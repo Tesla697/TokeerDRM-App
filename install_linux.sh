@@ -82,7 +82,9 @@ if pgrep -x steam >/dev/null 2>&1; then
     steam -shutdown >/dev/null 2>&1 || true
     for _ in $(seq 1 20); do pgrep -x steam >/dev/null 2>&1 || break; sleep 1; done
 fi
-python3 "$TDIR/tokeer_steam_config.py" "$APPID" "$LAUNCH"
+# Non-fatal: if auto-setting fails it prints the manual launch option and exits 0;
+# `|| true` guards against any unexpected error aborting the rest of setup.
+python3 "$TDIR/tokeer_steam_config.py" "$APPID" "$LAUNCH" || true
 
 # 6) Create the Proton prefix by launching once (it fails Denuvo - expected -
 #    but that first run is what builds compatdata/<appid>/pfx).

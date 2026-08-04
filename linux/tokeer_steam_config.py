@@ -120,19 +120,33 @@ def _indent_at(text, idx):
 
 
 def set_launch_options(path, appid, opts):
-    """Set "LaunchOptions" for appid inside Software/Valve/Steam/apps. Returns
-    True if the file was changed."""
+    """Set "LaunchOptions" for appid inside Software/Valve/Steam/apps. Creates the
+    apps block (and the app's own block) if Steam wrote the config but hasn't
+    listed this app yet. Returns True if the file was changed, else a string
+    reason for the diagnostics."""
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         text = fh.read()
 
+    esc = _vdf_escape(opts)
     apps = _navigate(text, ["Software", "Valve", "Steam", "apps"])
     if not apps:
         apps = _navigate(text, ["Software", "Valve", "Steam", "Apps"])
     if not apps:
-        return False
+        # Steam config exists but has no apps block yet - create one under the
+        # Steam block so we can still write the launch option.
+        steam = (_navigate(text, ["Software", "Valve", "Steam"])
+                 or _navigate(text, ["Software", "Valve", "steam"]))
+        if not steam:
+            return "no Software/Valve/Steam block in this localconfig.vdf"
+        s_open, _s_close = steam
+        ind = _indent_at(text, s_open) + "\t"
+        block = "\n" + ind + '"apps"' + "\n" + ind + "{" + "\n" + ind + "}"
+        text = text[: s_open + 1] + block + text[s_open + 1:]
+        apps = _navigate(text, ["Software", "Valve", "Steam", "apps"])
+        if not apps:
+            return "failed to create apps block"
     apps_open, apps_close = apps
 
-    esc = _vdf_escape(opts)
     app = _find_key_block(text, str(appid), apps_open + 1, apps_close)
     if app:
         _, a_open, a_close = app
@@ -158,7 +172,7 @@ def set_launch_options(path, appid, opts):
         new = text[: apps_open + 1] + block + text[apps_open + 1:]
 
     if new == text:
-        return False
+        return "no change (launch option already set?)"
     shutil.copy2(path, path + ".tokeerbak")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(new)
@@ -242,20 +256,38 @@ def main():
         print("ERROR: appid must be numeric", file=sys.stderr)
         sys.exit(2)
 
+    def manual_fallback(reason):
+        # Never abort the installer over this - print exactly what to set by hand
+        # and exit 0 so the rest of setup (prefix creation etc.) still runs.
+        print(f"  WARN: couldn't auto-set the launch option ({reason}).", file=sys.stderr)
+        print("  Set it yourself: Steam -> right-click the game -> Properties ->", file=sys.stderr)
+        print("  Launch Options, and paste EXACTLY:", file=sys.stderr)
+        print(f"\n    {opts}\n", file=sys.stderr)
+        sys.exit(0)
+
     roots = steam_roots()
     if not roots:
-        print("ERROR: no Steam install found", file=sys.stderr)
-        sys.exit(2)
+        manual_fallback("no Steam install auto-detected")
+
+    lc_files = []
+    for root in roots:
+        lc_files += glob.glob(os.path.join(root, "userdata", "*", "config", "localconfig.vdf"))
+    print(f"  steam roots: {roots}")
+    print(f"  localconfig.vdf found: {len(lc_files)}")
 
     changed = 0
+    reasons = []
+    for lc in lc_files:
+        try:
+            res = set_launch_options(lc, appid, opts)
+            if res is True:
+                changed += 1
+                print(f"  launch options set in {lc}")
+            else:
+                reasons.append(f"{lc}: {res}")
+        except Exception as e:
+            reasons.append(f"{lc}: {e}")
     for root in roots:
-        for lc in glob.glob(os.path.join(root, "userdata", "*", "config", "localconfig.vdf")):
-            try:
-                if set_launch_options(lc, appid, opts):
-                    changed += 1
-                    print(f"  launch options set in {lc}")
-            except Exception as e:
-                print(f"  WARN could not edit {lc}: {e}", file=sys.stderr)
         cfg = os.path.join(root, "config", "config.vdf")
         if os.path.isfile(cfg):
             try:
@@ -264,12 +296,9 @@ def main():
                 print(f"  WARN could not set compat tool in {cfg}: {e}", file=sys.stderr)
 
     if changed == 0:
-        print(
-            "ERROR: could not write launch options for app "
-            f"{appid} (no user localconfig.vdf matched). Is this the right appid?",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+        for r in reasons:
+            print(f"  - {r}", file=sys.stderr)
+        manual_fallback(f"no writable localconfig.vdf matched app {appid}")
     print(f"OK: launch options written for {changed} Steam user profile(s).")
 
 
