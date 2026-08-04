@@ -74,10 +74,20 @@ def die(msg: str, code: int = 1):
 def server_redeem(server: str, code: str) -> dict:
     """POST /drm/redeem {code} -> parsed json (raises on transport error)."""
     body = json.dumps({"code": code}).encode("utf-8")
+    # A real browser User-Agent: the urllib default ("Python-urllib/3.x") trips
+    # Cloudflare's Browser Integrity Check (error 1010) before the request ever
+    # reaches the backend. Any normal UA gets through.
     req = urllib.request.Request(
         server + "/drm/redeem",
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/125.0 Safari/537.36 TokeerRedeem"
+            ),
+            "Accept": "application/json",
+        },
         method="POST",
     )
     try:
