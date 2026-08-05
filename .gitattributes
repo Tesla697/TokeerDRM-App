@@ -4,6 +4,9 @@ install_linux.sh          text eol=lf
 linux/tokeer              text eol=lf
 linux/*.py                text eol=lf
 linux/*.sh                text eol=lf
+linux/*.c                 text eol=lf
+# The prebuilt native hook is a binary ELF - never touch its line endings.
+linux/*.so                binary
 tokeer_redeem_linux.py    text eol=lf
 README_LINUX.md           text eol=lf
 redeem-redirect/*.js      text eol=lf
