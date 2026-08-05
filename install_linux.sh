@@ -94,8 +94,11 @@ echo "[5/6] launching once to create the Proton prefix (first launch fails Denuv
 
 echo "[6/6] done."
 echo
-echo "Setup complete for app $APPID. When your code arrives, activate + launch with:"
+echo "Setup complete for app $APPID."
+echo "  Verify your setup (prints a code to paste in the ticket):"
+echo "    ~/.tokeer/tokeer verify $APPID"
+echo "  Then, when your activation code arrives:"
+echo "    ~/.tokeer/tokeer <CODE>"
 echo
-echo "    tokeer <CODE>"
-echo
-echo "(If the game is already open from this setup run, close it first, then run that.)"
+echo "(Full paths shown in case ~/.local/bin isn't on your PATH. If the game is"
+echo " already open from this setup run, close it first before activating.)"
