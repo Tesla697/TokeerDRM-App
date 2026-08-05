@@ -84,8 +84,19 @@ if ! case ":$PATH:" in *":$HOME/.local/bin:"*) true;; *) false;; esac; then
             touched="$touched ${rc##*/}"
         fi
     done
+    # fish shell: different syntax + its own config file. fish_add_path is
+    # idempotent (fish 3.2+), so it's safe to leave in config.fish.
+    fish_cfg="$HOME/.config/fish/config.fish"
+    if command -v fish >/dev/null 2>&1 || [ -f "$fish_cfg" ]; then
+        FLINE='fish_add_path "$HOME/.local/bin"'
+        if [ ! -f "$fish_cfg" ] || ! grep -Fq "$FLINE" "$fish_cfg"; then
+            mkdir -p "$(dirname "$fish_cfg")"
+            printf '\n# added by Tokeer installer\n%s\n' "$FLINE" >> "$fish_cfg"
+            touched="$touched config.fish"
+        fi
+    fi
     # No rc file at all? Create ~/.bashrc so it's set for next login.
-    if [ -z "$touched" ] && [ ! -f "$HOME/.zshrc" ]; then
+    if [ -z "$touched" ] && [ ! -f "$HOME/.zshrc" ] && [ ! -f "$fish_cfg" ]; then
         printf '\n# added by Tokeer installer\n%s\n' "$PLINE" >> "$HOME/.bashrc"
         touched=" .bashrc"
     fi
