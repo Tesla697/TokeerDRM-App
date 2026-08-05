@@ -70,10 +70,28 @@ fi
 mkdir -p "$HOME/.local/bin"
 ln -sf "$TDIR/tokeer" "$HOME/.local/bin/tokeer"
 echo "[3/6] installed 'tokeer' -> ~/.local/bin/tokeer"
-case ":$PATH:" in
-    *":$HOME/.local/bin:"*) : ;;
-    *) echo "  NOTE: ~/.local/bin is not on PATH - run activation as:  $TDIR/tokeer <CODE>" ;;
-esac
+# Make `tokeer` runnable by name in future shells: append ~/.local/bin to PATH in
+# whichever rc files exist (bash AND zsh - Arch/SteamOS often default to zsh, and
+# a bash-only line wouldn't help there). Idempotent. Only affects NEW terminals;
+# the full path ~/.tokeer/tokeer always works regardless of shell/PATH.
+if ! case ":$PATH:" in *":$HOME/.local/bin:"*) true;; *) false;; esac; then
+    PLINE='export PATH="$HOME/.local/bin:$PATH"'
+    touched=""
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+        [ -f "$rc" ] || continue
+        if ! grep -Fqx "$PLINE" "$rc"; then
+            printf '\n# added by Tokeer installer\n%s\n' "$PLINE" >> "$rc"
+            touched="$touched ${rc##*/}"
+        fi
+    done
+    # No rc file at all? Create ~/.bashrc so it's set for next login.
+    if [ -z "$touched" ] && [ ! -f "$HOME/.zshrc" ]; then
+        printf '\n# added by Tokeer installer\n%s\n' "$PLINE" >> "$HOME/.bashrc"
+        touched=" .bashrc"
+    fi
+    [ -n "$touched" ] && echo "  added ~/.local/bin to PATH in$touched (open a NEW terminal for 'tokeer' to work)"
+    echo "  for THIS terminal, use the full path:  $TDIR/tokeer <CODE>"
+fi
 
 # 5) Auto-write the Steam launch option (Steam must be closed while we edit).
 LAUNCH="WINEDLLOVERRIDES=\"dinput8=n,b\" $TDIR/ost-run.sh %command%"
