@@ -12,18 +12,24 @@ set -euo pipefail
 TDIR="${TOKEER_HOME:-$HOME/.tokeer}"
 
 if [ $# -lt 1 ]; then
-    echo "usage: tokeer verify <APPID>     # check your setup, print a code to paste in the ticket"
-    echo "       tokeer <CODE>             # activate + launch"
-    echo "       tokeer <CODE> --no-launch # write the ticket only"
+    echo "usage: tokeer verify <APPID>       # Steam: check setup, print a code to paste in the ticket"
+    echo "       tokeer verify-ubi <APPID>   # Ubisoft: check the game files for the Proton flow"
+    echo "       tokeer <CODE>               # activate + launch"
+    echo "       tokeer <CODE> --no-launch   # write the ticket only"
     exit 1
 fi
 
-# `tokeer verify <APPID>` -> run the setup validator and print the TLX1. code.
-if [ "$1" = "verify" ]; then
-    shift
+# `tokeer verify <APPID>` (Steam) / `tokeer verify-ubi <APPID>` (Ubisoft) ->
+# run the setup validator and print the TLX1. code. verify-ubi passes the
+# "ubisoft" mode so the validator checks files without the hook/launch option.
+if [ "$1" = "verify" ] || [ "$1" = "verify-ubi" ]; then
+    sub="$1"; shift
     if [ ! -f "$TDIR/tokeer_validate_linux.py" ]; then
         echo "ERROR: validator missing. Re-run install_linux.sh <APPID>." >&2
         exit 1
+    fi
+    if [ "$sub" = "verify-ubi" ]; then
+        exec python3 "$TDIR/tokeer_validate_linux.py" "$@" ubisoft
     fi
     exec python3 "$TDIR/tokeer_validate_linux.py" "$@"
 fi

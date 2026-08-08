@@ -148,15 +148,21 @@ def compat_tool(appid):
 # --------------------------------------------------------------------------- #
 def main():
     if len(sys.argv) < 2 or not re.fullmatch(r"\d+", sys.argv[1] or ""):
-        print("usage: tokeer verify <APPID>", file=sys.stderr)
+        print("usage: tokeer verify <APPID>          (Steam)", file=sys.stderr)
+        print("       tokeer verify-ubi <APPID>      (Ubisoft / Proton)", file=sys.stderr)
         sys.exit(2)
     appid = sys.argv[1]
+    # "ubisoft" mode verifies the files for the upc_r2 + dbdata Proton flow and
+    # does NOT require the native hook or the ost-run.sh launch option (Ubisoft
+    # runs from the game folder, not through the Denuvo native hook).
+    mode = "ubisoft" if (len(sys.argv) > 2 and sys.argv[2].lower() == "ubisoft") else "steam"
 
-    print(f"Checking Tokeer setup for app {appid} ...")
+    print(f"Checking Tokeer {mode} setup for app {appid} ...")
     installdir, manifest = find_install(appid)
     size, exes = folder_stats(installdir)
     report = {
         "v": 1,
+        "mode": mode,
         "appid": appid,
         "generated": int(time.time()),
         "installed": bool(manifest and installdir),
@@ -170,12 +176,25 @@ def main():
 
     def mark(ok):
         return "OK " if ok else "-- "
-    print(f"  {mark(report['installed'])} game installed" + (f"  ({installdir})" if installdir else ""))
-    print(f"  {mark(report['prefix'])} Proton prefix")
-    print(f"  {mark(report['hook'])} native hook built")
-    print(f"  {mark(report['launch_opt'])} launch option set")
-    print(f"  .. Proton: {report['proton'] or 'default/unknown'}")
-    print()
+
+    if mode == "ubisoft":
+        # Ubisoft (Proton) verification confirms the GAME is set up and ready.
+        # The care-package files (upc_r2 loader + dbdata) are handed to the user
+        # in the NEXT step, so we do NOT check for them here, nor the native hook
+        # or launch option (Ubisoft runs folder-based, not through the hook).
+        print(f"  {mark(report['installed'])} game installed" + (f"  ({installdir})" if installdir else ""))
+        print(f"  {mark(report['prefix'])} Proton prefix")
+        print(f"  .. Proton: {report['proton'] or 'default/unknown'}")
+        print()
+        passed_all = report["installed"] and report["prefix"]
+    else:
+        print(f"  {mark(report['installed'])} game installed" + (f"  ({installdir})" if installdir else ""))
+        print(f"  {mark(report['prefix'])} Proton prefix")
+        print(f"  {mark(report['hook'])} native hook built")
+        print(f"  {mark(report['launch_opt'])} launch option set")
+        print(f"  .. Proton: {report['proton'] or 'default/unknown'}")
+        print()
+        passed_all = report["installed"] and report["prefix"] and report["hook"] and report["launch_opt"]
 
     raw = json.dumps(report, separators=(",", ":"), sort_keys=True).encode("utf-8")
     sig = hmac.new(SECRET, raw, hashlib.sha256).digest()
@@ -185,7 +204,7 @@ def main():
     print()
     print(code)
     print()
-    if not (report["installed"] and report["prefix"] and report["hook"] and report["launch_opt"]):
+    if not passed_all:
         print("NOTE: some checks did not pass - the bot will tell you exactly what to fix.")
 
 

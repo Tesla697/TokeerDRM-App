@@ -18,9 +18,14 @@ set -euo pipefail
 
 APPID="${1:-}"
 if ! [[ "$APPID" =~ ^[0-9]+$ ]]; then
-    echo "usage: install_linux.sh <APPID>    (numeric Steam AppID)" >&2
+    echo "usage: install_linux.sh <APPID> [ubisoft]   (numeric Steam AppID)" >&2
     exit 1
 fi
+# "ubisoft" mode installs the tokeer tools only: it does NOT build the native
+# Denuvo hook and does NOT write a Steam launch option. Ubisoft games run
+# folder-based under Proton (upc_r2 + dbdata), so the hook/launch option would
+# break them. It still creates the Proton prefix so verify-ubi can pass.
+MODE="${2:-steam}"
 
 TDIR="${TOKEER_HOME:-$HOME/.tokeer}"
 SERVER="${TOKEER_DRM_SERVER:-https://luastools.xyz}"
@@ -53,11 +58,15 @@ fi
 printf 'SERVER_URL = "%s"\n' "$SERVER" > "$TDIR/server_config.py"
 
 # 3) Native hook: use the prebuilt .so if shipped, else compile it.
-echo "[2/6] preparing native hook..."
+#    Ubisoft mode skips this entirely (the folder-based flow doesn't use it).
 chmod +x "$TDIR/build.sh" "$TDIR/ost-run.sh" "$TDIR/tokeer" 2>/dev/null || true
-if [ -f "$TDIR/ost_native_hook.so" ]; then
+if [ "$MODE" = "ubisoft" ]; then
+    echo "[2/6] Ubisoft mode: skipping native hook (not needed for the Proton folder flow)"
+elif [ -f "$TDIR/ost_native_hook.so" ]; then
+    echo "[2/6] preparing native hook..."
     echo "  using prebuilt ost_native_hook.so"
 elif command -v gcc >/dev/null 2>&1; then
+    echo "[2/6] preparing native hook..."
     ( cd "$TDIR" && ./build.sh )
 else
     echo "ERROR: no prebuilt ost_native_hook.so and gcc is not installed." >&2
@@ -105,15 +114,21 @@ if ! case ":$PATH:" in *":$HOME/.local/bin:"*) true;; *) false;; esac; then
 fi
 
 # 5) Auto-write the Steam launch option (Steam must be closed while we edit).
-LAUNCH="WINEDLLOVERRIDES=\"dinput8=n,b\" $TDIR/ost-run.sh %command%"
-echo "[4/6] writing Steam launch options (Steam will restart)..."
-if pgrep -x steam >/dev/null 2>&1; then
-    steam -shutdown >/dev/null 2>&1 || true
-    for _ in $(seq 1 20); do pgrep -x steam >/dev/null 2>&1 || break; sleep 1; done
+#    Ubisoft mode SKIPS this: the game must launch normally under Proton, not
+#    through the Denuvo hook, so writing ost-run.sh here would break it.
+if [ "$MODE" = "ubisoft" ]; then
+    echo "[4/6] Ubisoft mode: skipping Steam launch option (game runs folder-based under Proton)"
+else
+    LAUNCH="WINEDLLOVERRIDES=\"dinput8=n,b\" $TDIR/ost-run.sh %command%"
+    echo "[4/6] writing Steam launch options (Steam will restart)..."
+    if pgrep -x steam >/dev/null 2>&1; then
+        steam -shutdown >/dev/null 2>&1 || true
+        for _ in $(seq 1 20); do pgrep -x steam >/dev/null 2>&1 || break; sleep 1; done
+    fi
+    # Non-fatal: if auto-setting fails it prints the manual launch option and exits 0;
+    # `|| true` guards against any unexpected error aborting the rest of setup.
+    python3 "$TDIR/tokeer_steam_config.py" "$APPID" "$LAUNCH" || true
 fi
-# Non-fatal: if auto-setting fails it prints the manual launch option and exits 0;
-# `|| true` guards against any unexpected error aborting the rest of setup.
-python3 "$TDIR/tokeer_steam_config.py" "$APPID" "$LAUNCH" || true
 
 # 6) Create the Proton prefix by launching once (it fails Denuvo - expected -
 #    but that first run is what builds compatdata/<appid>/pfx).
@@ -124,10 +139,17 @@ echo "[5/6] launching once to create the Proton prefix (first launch fails Denuv
 echo "[6/6] done."
 echo
 echo "Setup complete for app $APPID."
-echo "  Verify your setup (prints a code to paste in the ticket):"
-echo "    ~/.tokeer/tokeer verify $APPID"
-echo "  Then, when your activation code arrives:"
-echo "    ~/.tokeer/tokeer <CODE>"
+if [ "$MODE" = "ubisoft" ]; then
+    echo "  Verify your game (prints a code to paste in the ticket):"
+    echo "    ~/.tokeer/tokeer verify-ubi $APPID"
+    echo "  Then paste the care-package files into the game folder and send your"
+    echo "  token_req in the ticket to get your dbdata.json."
+else
+    echo "  Verify your setup (prints a code to paste in the ticket):"
+    echo "    ~/.tokeer/tokeer verify $APPID"
+    echo "  Then, when your activation code arrives:"
+    echo "    ~/.tokeer/tokeer <CODE>"
+fi
 echo
 echo "(Full paths shown in case ~/.local/bin isn't on your PATH. If the game is"
 echo " already open from this setup run, close it first before activating.)"
