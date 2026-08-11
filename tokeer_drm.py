@@ -113,6 +113,43 @@ def _run_extract(app_id: str) -> dict | None:
     }
 
 
+_STEAMID64_BASE = 76561197960265728  # 0x0110000100000000 — individual/public base
+
+
+def _current_steam_id() -> str:
+    """SteamID64 of the account currently logged into Steam on this PC, or "".
+
+    Read from HKCU\\Software\\Valve\\Steam\\ActiveProcess\\ActiveUser (the 32-bit
+    account id of the running Steam user; 0 when Steam isn't running). This is the
+    LIVE account, independent of any ticket, so it can prove whether an extracted
+    ticket really belongs to the person generating a code."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Valve\Steam\ActiveProcess") as key:
+            account_id, _ = winreg.QueryValueEx(key, "ActiveUser")
+        account_id = int(account_id)
+        if account_id <= 0:
+            return ""
+        return str(_STEAMID64_BASE + account_id)
+    except Exception:
+        return ""
+
+
+def _appticket_owner_steamid(appticket_hex: str) -> str:
+    """SteamID64 embedded in an App Ownership Ticket (owner), or "".
+
+    Mirror of the server's parser: little-endian uint64 at offset 8."""
+    try:
+        data = bytes.fromhex((appticket_hex or "").strip())
+        if len(data) < 16:
+            return ""
+        sid = int.from_bytes(data[8:16], "little")
+        return str(sid) if sid >= _STEAMID64_BASE else ""
+    except Exception:
+        return ""
+
+
 def _write_registry(app_id: str, appticket_hex: str, eticket_hex: str) -> None:
     """Write AppTicket (ownership) + ETicket (encrypted) to Steam's credential store."""
     import winreg
@@ -587,6 +624,19 @@ class Api:
                 f"Make sure Steam is running and signed in."
             )}
 
+        # Anti-resell guard: the extracted ticket must belong to the account
+        # currently logged into Steam. After a redeem, the ORIGINAL owner's ticket
+        # is cached in this PC's registry; re-extracting it here would let someone
+        # who only redeemed a code mint fresh codes for a game they don't own.
+        # Block that when the live account and the ticket's owner disagree.
+        current_sid = _current_steam_id()
+        owner_sid = _appticket_owner_steamid(tickets["appticket"])
+        if current_sid and owner_sid and current_sid != owner_sid:
+            return {"ok": False, "error": (
+                "This game was activated with a redeemed code, your Steam account "
+                "doesn't own it, so you can't generate codes for it."
+            )}
+
         try:
             status, data = _server_post("/drm/generate", {
                 "appticket": tickets["appticket"],
@@ -595,6 +645,7 @@ class Api:
                 "app_id": app_id,
                 "max_uses": int(max_uses),
                 "created_by_user": tickets["steam_id"],
+                "current_steam_id": current_sid,
             })
         except Exception as e:
             return {"ok": False, "error": f"Server unreachable: {e}"}
