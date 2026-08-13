@@ -34,11 +34,28 @@
  *  as ORIGIN, the DNS record, and the Origin Rule all use the same one.)
  */
 
-const ORIGIN = "https://codestore.luastools.xyz";
+// Path prefix -> origin. Both origins are the SAME box (31.57.38.79) on
+// DIFFERENT ports, and a Cloudflare Origin Rule can only set the port per
+// hostname, so each port needs its own hostname:
+//
+//   codestore.luastools.xyz -> :8091  code store  (/drm/*, /quota*)
+//   backend.luastools.xyz   -> :8080  Tokeer API  (/eticket)
+//
+// Anything not matching a prefix here is refused, so the proxy can never be
+// used as an open relay to arbitrary origin paths.
+const ROUTES = [
+  { prefixes: ["/drm/", "/quota"], origin: "https://codestore.luastools.xyz" },
+  { prefixes: ["/eticket"],        origin: "https://backend.luastools.xyz" },
+];
 
-// Only these path prefixes are allowed through, so the proxy can never be used
-// as an open relay to arbitrary origin paths.
-const ALLOW = ["/drm/", "/quota"];
+function resolveOrigin(pathname) {
+  for (const r of ROUTES) {
+    if (r.prefixes.some((p) => pathname === p || pathname.startsWith(p))) {
+      return r.origin;
+    }
+  }
+  return null;
+}
 
 export default {
   async fetch(request) {
@@ -47,11 +64,12 @@ export default {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: cors() });
     }
-    if (!ALLOW.some((p) => url.pathname === p || url.pathname.startsWith(p))) {
+    const origin = resolveOrigin(url.pathname);
+    if (!origin) {
       return json({ success: false, error: "not found" }, 404);
     }
 
-    const target = ORIGIN + url.pathname + url.search;
+    const target = origin + url.pathname + url.search;
     const init = {
       method: request.method,
       headers: passHeaders(request.headers),
@@ -63,7 +81,7 @@ export default {
     try {
       resp = await fetch(target, init);
     } catch (e) {
-      return json({ success: false, error: "code store unreachable" }, 502);
+      return json({ success: false, error: "origin unreachable" }, 502);
     }
 
     // Re-emit with permissive CORS so the redeemer (and a browser, if ever) can read it.
@@ -80,6 +98,12 @@ function passHeaders(h) {
     const v = h.get(k);
     if (v) out.set(k, v);
   }
+  // Forward the real visitor IP so the origin can rate-limit per user. A Worker
+  // subrequest to a proxied origin otherwise arrives from a Cloudflare edge IP,
+  // making every visitor look like one client. CF-Connecting-IP is the true
+  // visitor; pass it as X-Forwarded-For (fall back to any inbound XFF).
+  const ip = h.get("CF-Connecting-IP") || h.get("X-Forwarded-For");
+  if (ip) out.set("X-Forwarded-For", ip);
   return out;
 }
 
