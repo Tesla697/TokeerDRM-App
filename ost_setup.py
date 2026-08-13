@@ -699,6 +699,29 @@ def is_admin():
         return False
 
 
+def _packaged() -> bool:
+    """True when running as a built app, under EITHER packager: PyInstaller sets
+    sys.frozen, Nuitka sets the module global __compiled__."""
+    return bool(getattr(sys, "frozen", False)) or ("__compiled__" in globals())
+
+
+def _self_exe() -> str:
+    """Absolute path to the real launched executable.
+
+    PyInstaller points sys.executable at the app exe. Nuitka onefile points
+    sys.executable at a throwaway python.exe inside its extraction temp dir (which
+    is what caused "Windows cannot find ...python.exe" on relaunch) and instead
+    exports the true onefile exe path in NUITKA_ONEFILE_BINARY."""
+    onefile = os.environ.get("NUITKA_ONEFILE_BINARY")
+    if onefile:
+        return onefile
+    # Nuitka but the env var is missing (version drift / standalone): sys.argv[0]
+    # is the launched exe, whereas sys.executable is the temp python.exe.
+    if "__compiled__" in globals():
+        return os.path.abspath(sys.argv[0])
+    return sys.executable
+
+
 def relaunch_elevated(flag="--install-engine", timeout_s=240, on_progress=None):
     """Relaunch this program elevated (UAC prompt) with `flag`, and block until it
     finishes. Raises if the prompt is declined. The elevated instance handles the
@@ -709,8 +732,8 @@ def relaunch_elevated(flag="--install-engine", timeout_s=240, on_progress=None):
     import ctypes
     from ctypes import wintypes
 
-    if getattr(sys, "frozen", False):
-        target, params = sys.executable, flag
+    if _packaged():
+        target, params = _self_exe(), flag
     else:
         target = sys.executable  # python.exe
         params = f'"{os.path.abspath(__file__).replace("ost_setup.py", "tokeer_drm.py")}" {flag}'

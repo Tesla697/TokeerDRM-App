@@ -64,11 +64,11 @@ def _register_uri_scheme() -> None:
     """Register tokeerdrm:// under HKCU (per-user, no admin) pointing at this exe.
     Only meaningful in the packaged build — from source there's no stable exe to
     hand the OS. Idempotent: safe to run on every launch."""
-    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+    if sys.platform != "win32" or not ost_setup._packaged():
         return
     try:
         import winreg
-        exe = sys.executable
+        exe = ost_setup._self_exe()
         base = r"Software\Classes\%s" % URI_SCHEME
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as k:
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, "URL:TokeerDRM Protocol")
@@ -318,9 +318,10 @@ def _cleanup_update_leftovers():
     background on startup: by now the previous process has exited and released its lock,
     so the rename-swap's leftover gets removed reliably here instead of in the detached
     helper, which can lose the race against the lingering PyInstaller bootloader."""
-    if not getattr(sys, "frozen", False):
+    if not ost_setup._packaged():
         return
-    targets = [sys.executable + ".old", sys.executable + ".new"]
+    _exe = ost_setup._self_exe()
+    targets = [_exe + ".old", _exe + ".new"]
 
     def _worker():
         for _ in range(30):  # ~30s of attempts while the old process finishes exiting
@@ -402,7 +403,7 @@ class Api:
         """In-app self-update: download the latest release .exe, swap it in place,
         and relaunch — no browser, no manual download. Only works in the packaged
         (frozen) build; from source there's nothing to swap."""
-        if not getattr(sys, "frozen", False):
+        if not ost_setup._packaged():
             return {"ok": False, "message": "In-app update only works in the packaged app — use the GitHub link."}
 
         def progress(pct, msg):
@@ -423,7 +424,7 @@ class Api:
             if not asset:
                 return {"ok": False, "message": "The latest release has no .exe to download."}
 
-            cur_exe = sys.executable
+            cur_exe = ost_setup._self_exe()
             new_exe = cur_exe + ".new"
             progress(10, "Downloading update…")
             with requests.get(asset["browser_download_url"], headers={"User-Agent": "TokeerDRM"},
