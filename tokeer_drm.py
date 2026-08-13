@@ -45,9 +45,114 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.24"                       # bump on every release
+APP_VERSION = "1.0.25"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
+
+# ---------------------------------------------------------------------------
+# One-click deep link (tokeerdrm://redeem?code=XXXXXX)
+# The Discord "Redeem in App" button opens https://luastools.xyz/redeem?code=…
+# which redirects to this custom scheme. We register the handler, guard a single
+# instance, and hand the code to the running UI so it auto-applies + launches.
+# ---------------------------------------------------------------------------
+URI_SCHEME = "tokeerdrm"
+PENDING_CODE_FILE = os.path.join(tempfile.gettempdir(), "tokeerdrm_pending_code.txt")
+_SINGLE_INSTANCE_HANDLE = None  # keep the mutex handle alive for the process lifetime
+
+
+def _register_uri_scheme() -> None:
+    """Register tokeerdrm:// under HKCU (per-user, no admin) pointing at this exe.
+    Only meaningful in the packaged build — from source there's no stable exe to
+    hand the OS. Idempotent: safe to run on every launch."""
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    try:
+        import winreg
+        exe = sys.executable
+        base = r"Software\Classes\%s" % URI_SCHEME
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as k:
+            winreg.SetValueEx(k, None, 0, winreg.REG_SZ, "URL:TokeerDRM Protocol")
+            winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\DefaultIcon") as k:
+            winreg.SetValueEx(k, None, 0, winreg.REG_SZ, f'"{exe}",0')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\shell\open\command") as k:
+            winreg.SetValueEx(k, None, 0, winreg.REG_SZ, f'"{exe}" "%1"')
+    except Exception:
+        pass
+
+
+def _code_from_argv(argv) -> str | None:
+    """Pull a 6-char code out of a tokeerdrm://redeem?code=XXXXXX argument."""
+    import urllib.parse
+    for a in argv:
+        if not a or not a.lower().startswith(URI_SCHEME + ":"):
+            continue
+        try:
+            code = ""
+            parsed = urllib.parse.urlparse(a)
+            qs = urllib.parse.parse_qs(parsed.query)
+            if qs.get("code"):
+                code = qs["code"][0]
+            code = "".join(c for c in code.upper() if c.isalnum())[:6]
+            if len(code) == 6:
+                return code
+        except Exception:
+            pass
+    return None
+
+
+def _acquire_single_instance() -> bool:
+    """True if we're the first/primary instance. A named Win32 mutex survives for
+    the life of the process; a second launch sees ERROR_ALREADY_EXISTS (183)."""
+    global _SINGLE_INSTANCE_HANDLE
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        handle = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\TokeerDRM_SingleInstance")
+        already = ctypes.windll.kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
+        _SINGLE_INSTANCE_HANDLE = handle  # keep alive
+        return not already
+    except Exception:
+        return True  # if the guard fails, don't block the app from opening
+
+
+def _deliver_code_to_ui(code: str) -> None:
+    """Surface the running window and hand the code to the JS auto-redeem flow."""
+    if WINDOW is None:
+        return
+    try:
+        try: WINDOW.restore()   # un-minimize if needed
+        except Exception: pass
+        try: WINDOW.show()
+        except Exception: pass
+        WINDOW.evaluate_js(
+            f"window.__ostIncomingCode && window.__ostIncomingCode({json.dumps(code)})")
+    except Exception:
+        pass
+
+
+def _watch_pending_codes() -> None:
+    """Primary-instance watcher: a second launch (from a fresh deep-link click while
+    the app is already open) drops the code in PENDING_CODE_FILE; pick it up and run it."""
+    def worker():
+        while True:
+            try:
+                if os.path.exists(PENDING_CODE_FILE):
+                    code = ""
+                    try:
+                        with open(PENDING_CODE_FILE, "r", encoding="utf-8") as f:
+                            code = f.read()
+                    finally:
+                        try: os.remove(PENDING_CODE_FILE)
+                        except OSError: pass
+                    code = "".join(c for c in (code or "").upper() if c.isalnum())[:6]
+                    if len(code) == 6:
+                        _deliver_code_to_ui(code)
+            except Exception:
+                pass
+            time.sleep(0.6)
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def _version_gt(a, b):
@@ -67,12 +172,30 @@ def _version_gt(a, b):
 
 
 # ---------------------------------------------------------------------------
-# Paths (work both from source and from a PyInstaller one-file build)
+# Paths (work from source, a PyInstaller one-file build, and a Nuitka onefile
+# build). Each packager stages bundled data in a different place:
+#   PyInstaller -> sys._MEIPASS
+#   Nuitka      -> next to __file__ (the onefile unpack dir)
+#   source      -> next to this script
+# Probe them in order and return the first where the resource actually exists, so
+# one code path covers all three without depending on which packager built us.
 # ---------------------------------------------------------------------------
 
 def resource_path(rel: str) -> str:
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, rel)
+    bases = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bases.append(meipass)
+    bases.append(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        bases.append(os.path.dirname(os.path.abspath(sys.argv[0])))
+    except Exception:
+        pass
+    for base in bases:
+        candidate = os.path.join(base, rel)
+        if os.path.exists(candidate):
+            return candidate
+    return os.path.join(bases[0], rel)
 
 
 EXTRACT_EXE = resource_path("extract_tickets.exe")
@@ -132,6 +255,25 @@ def _current_steam_id() -> str:
         if account_id <= 0:
             return ""
         return str(_STEAMID64_BASE + account_id)
+    except Exception:
+        return ""
+
+
+def _machine_guid() -> str:
+    """This machine's Windows MachineGuid, or "".
+
+    Read from HKLM\\SOFTWARE\\Microsoft\\Cryptography\\MachineGuid — the same value
+    the validator hashes into the ticket's HWID. A ticket-issued code is locked to
+    the machine that opened the ticket, so the server compares this against the
+    bound machine and refuses a code shared to a different PC. Reads bit-identical
+    to the validator's PowerShell, so a legitimate redeem on the right machine
+    always matches."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Cryptography") as key:
+            guid, _ = winreg.QueryValueEx(key, "MachineGuid")
+        return str(guid).strip()
     except Exception:
         return ""
 
@@ -331,8 +473,9 @@ class Api:
                 except OSError:
                     os.replace(old_exe, cur_exe)      # roll back so the app isn't bricked
                     raise
-                # DETACHED_PROCESS so the new app isn't tied to this dying one
-                subprocess.Popen([cur_exe], creationflags=0x00000008, close_fds=True)
+                # DETACHED_PROCESS so the new app isn't tied to this dying one.
+                # --relaunched skips the single-instance guard during the handover.
+                subprocess.Popen([cur_exe, "--relaunched"], creationflags=0x00000008, close_fds=True)
                 _quit_soon()
                 return {"ok": True, "message": "Updating… TokeerDRM will restart automatically."}
             except OSError:
@@ -365,7 +508,7 @@ class Api:
                 "ping -n 2 127.0.0.1 >nul",
                 "goto swaploop",
                 ":done",
-                'start "" "%CUR%"',
+                'start "" "%CUR%" --relaunched',
                 'del "%NEW%" >nul 2>&1',
                 'del "%OLD%" >nul 2>&1',
                 'del "%~f0"',
@@ -711,7 +854,7 @@ class Api:
                              "click Apply, choose Enable, then redeem once Steam is back."}
 
         try:
-            status, data = _server_post("/drm/redeem", {"code": code})
+            status, data = _server_post("/drm/redeem", {"code": code, "hwid": _machine_guid()})
         except Exception as e:
             return {"ok": False, "error": f"Server unreachable: {e}"}
 
@@ -734,6 +877,22 @@ class Api:
             "app_id": app_id,
             "uses_remaining": data.get("uses_remaining"),
         }
+
+    def run_game(self, app_id: str) -> dict:
+        """Launch the game through Steam after a ticket is applied (one-click flow)."""
+        app_id = "".join(c for c in str(app_id) if c.isdigit())
+        if not app_id:
+            return {"ok": False, "error": "No app id to launch."}
+        try:
+            url = f"steam://rungameid/{app_id}"
+            if sys.platform == "win32":
+                os.startfile(url)  # hand off to Steam's URL handler
+            else:
+                import webbrowser
+                webbrowser.open(url)
+            return {"ok": True, "app_id": app_id}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
 
 # ---------------------------------------------------------------------------
@@ -800,7 +959,7 @@ def _ensure_webview2() -> bool:
     return _webview2_installed()
 
 
-def main() -> None:
+def main(initial_code=None) -> None:
     if sys.platform == "win32" and not _ensure_webview2():
         _msgbox("TokeerDRM",
                 "WebView2 is required to run TokeerDRM.\nInstall it and reopen the app.")
@@ -808,6 +967,7 @@ def main() -> None:
 
     global WINDOW
     _cleanup_update_leftovers()  # remove a previous update's <exe>.old / .new
+    _register_uri_scheme()       # make tokeerdrm:// open this app (per-user, idempotent)
     api = Api()
     window = webview.create_window(
         APP_TITLE,
@@ -831,6 +991,17 @@ def main() -> None:
         window.events.closed += lambda *a: _loaded.__setitem__("ok", True)  # closed early = don't nag
     except Exception:
         _loaded["ok"] = True  # older pywebview without events — don't nag
+
+    # One-click flow: watch for codes forwarded by a second launch, and deliver a
+    # code this instance was opened with (after the UI has had a moment to boot).
+    _watch_pending_codes()
+    if initial_code:
+        def _deliver_initial(*_a):
+            threading.Timer(1.6, lambda: _deliver_code_to_ui(initial_code)).start()
+        try:
+            window.events.loaded += _deliver_initial
+        except Exception:
+            threading.Timer(2.5, lambda: _deliver_code_to_ui(initial_code)).start()
 
     def _blank_watchdog():
         time.sleep(30)
@@ -906,8 +1077,26 @@ if __name__ == "__main__":
             ost_setup.write_progress(100, "Done")
         sys.exit(0)
 
+    # Deep-link / single-instance handling for the one-click "Redeem in App" flow.
+    # `--relaunched` is set by the self-updater when it starts the new build: during
+    # the ~1s handover both processes are alive, so we must NOT let the guard treat
+    # the fresh copy as a duplicate and exit it.
+    _incoming_code = _code_from_argv(sys.argv[1:])
+    _relaunched = "--relaunched" in sys.argv
+    _is_primary = _acquire_single_instance()   # always grab/hold the mutex handle
+    if not _relaunched and not _is_primary:
+        # Another copy is already running. Hand it the code (if any) and bow out so
+        # we don't open a duplicate window.
+        if _incoming_code:
+            try:
+                with open(PENDING_CODE_FILE, "w", encoding="utf-8") as _f:
+                    _f.write(_incoming_code)
+            except Exception:
+                pass
+        sys.exit(0)
+
     try:
-        main()
+        main(initial_code=_incoming_code)
     except Exception as exc:
         log_path = os.path.join(tempfile.gettempdir(), "TokeerDRM_error.log")
         try:

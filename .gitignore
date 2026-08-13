@@ -4,6 +4,14 @@ dist/
 __pycache__/
 *.pyc
 
+# Nuitka build outputs (produced by build_nuitka.py; kept outside the repo, but
+# guard against stray copies + the crash report a failed build leaves behind)
+nuitka-build/
+*.build/
+*.dist/
+*.onefile-build/
+nuitka-crash-report.xml
+
 # extract_tickets.exe output (appid-named folders + raw dumps)
 [0-9]*/
 *.bin
