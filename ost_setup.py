@@ -26,8 +26,16 @@ import subprocess
 import urllib.request
 
 OST_RELEASES_API = "https://api.github.com/repos/OpenSteam001/OpenSteamTool/releases/latest"
-CUSTOM_OST_REPO   = "Tesla697/OpenSteamTool"
+# The Denuvo-capable core now ships from BetterSteamTools (the merged upstream:
+# structural detection, env-less tracking, eticket pinning, LegacyCDKey). Its
+# public build has the on-demand eticket URL COMPILED OUT (empty), so we re-enable
+# it at runtime via a seteticketurl() lua below — otherwise strict-Denuvo titles
+# that need a launch-nonce-bound ticket fail with 88500012.
+CUSTOM_OST_REPO   = "madoiscool/BetterSteamTools"
 CUSTOM_OST_API    = f"https://api.github.com/repos/{CUSTOM_OST_REPO}/releases/latest"
+# On-demand eticket mint endpoint (Cloudflare-fronted; origin IP hidden, rate
+# limited). Written into a lua so the BetterSteamTools DLL enables minting.
+ETICKET_URL       = "https://luastools.xyz/eticket"
 _CUSTOM_MARKER    = ".tokeer_ost_custom"
 OST_DLLS = ("dwmapi.dll", "xinput1_4.dll", "OpenSteamTool.dll")
 ENGINE_CORES = ("OpenSteamTool.dll",)  # the only Denuvo-capable engine we support
@@ -377,9 +385,37 @@ def ensure_engine():
 def _ensure_stplugin_dir(sp):
     """OST's toml points at config\\stplug-in (the SteamTools library). A user who never
     had SteamTools won't have that folder, so OST's lua path would be missing. Create it
-    if absent (no-op if it already exists) so the redirect always resolves."""
+    if absent (no-op if it already exists) so the redirect always resolves.
+
+    Also drops the eticket-enable lua here, so it lands on EVERY setup path (both the
+    standard install via _ensure_toml and the custom-DLL install which calls this
+    directly)."""
     try:
         os.makedirs(os.path.join(sp, "config", "stplug-in"), exist_ok=True)
+    except OSError:
+        pass
+    _ensure_eticket_lua(sp)
+
+
+def _ensure_eticket_lua(sp):
+    """Enable on-demand eticket minting on the BetterSteamTools DLL.
+
+    That DLL is built with the eticket URL compiled out (empty), so minting is
+    off by default. OST parses every .lua in config\\stplug-in and exposes
+    seteticketurl(); dropping this one-line lua points the DLL at our backend so
+    strict-Denuvo titles get a launch-nonce-bound ticket instead of 88500012.
+    Idempotent — rewritten only when missing or stale so a URL change propagates."""
+    try:
+        d = os.path.join(sp, "config", "stplug-in")
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, "tokeer_eticket.lua")
+        want = f'seteticketurl("{ETICKET_URL}")\n'
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                if f.read().strip() == want.strip():
+                    return
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(want)
     except OSError:
         pass
 
@@ -1378,6 +1414,11 @@ def install_custom_dll(progress=_noop, restart_steam=True):
             return {"ok": False, "defender": True, "message": LUATOOLS_HINT, "url": LUATOOLS_URL}
         _start_steam(sp)
         return {"ok": False, "message": f"Couldn't install custom DLL: {e}"}
+
+    # The BetterSteamTools DLL ships with eticket minting compiled out; enable it
+    # via the seteticketurl lua so strict-Denuvo redeems keep working after a
+    # core-only swap (this path doesn't go through _ensure_toml).
+    _ensure_stplugin_dir(sp)
 
     if restart_steam:
         progress(90, "Restarting Steam…")
