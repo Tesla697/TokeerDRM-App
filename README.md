@@ -1,7 +1,6 @@
 # TokeerDRM — Standalone App
 
-A native desktop version of the TokeerDRM Millennium plugin, for people who don't
-use Millennium. Same engine, same server, same codes — just outside Steam.
+A native desktop app for redeeming and generating TokeerDRM codes, outside Steam.
 
 - **Activate** — paste a 6-character code → the AppTicket + ETicket are written to
   your registry → launch the game from Steam.

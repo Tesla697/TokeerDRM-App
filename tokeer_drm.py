@@ -1,7 +1,6 @@
 """
 TokeerDRM — standalone desktop app.
 
-Same engine as the Millennium plugin, for people who don't use Millennium:
   • Generate: run extract_tickets.exe → AppTicket + ETicket → server → 6-char code
   • Redeem:   code → server → write AppTicket + ETicket to the registry → play
 
