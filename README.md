@@ -1,41 +1,51 @@
-# TokeerDRM — Standalone App
+# TokeerDRM
 
-A native desktop app for redeeming and generating TokeerDRM codes, outside Steam.
+Desktop app for redeeming and generating TokeerDRM codes.
 
-- **Activate** — paste a 6-character code → the AppTicket + ETicket are written to
-  your registry → launch the game from Steam.
-- **Generate** — enter a game's Steam AppID → if your signed-in account owns it, you
-  get a shareable code (no install or launch needed). Codes you don't own are
-  refused by the server (real Steam-signature check).
+Two things it does:
 
-The UI is HTML/CSS/JS in a native WebView2 window (pywebview); the Python side runs
-`extract_tickets.exe`, writes the registry, and talks to the code-store server.
+**Activate** - paste a 6 character code, it writes the AppTicket and ETicket to your
+registry, then you launch the game from Steam.
+
+**Generate** - type a game's Steam AppID and get a shareable code, as long as your
+signed in account actually owns the game. The server checks the Steam signature on
+the ownership ticket, so codes for games you don't own get rejected.
+
+UI is HTML/CSS/JS in a WebView2 window via pywebview. The Python side runs
+`extract_tickets.exe`, writes the registry and talks to the code store.
 
 ## Requirements
-- **Windows 10/11** with the **Edge WebView2 runtime** (preinstalled on Win11; on
-  older systems install it free from Microsoft).
-- **Steam running and signed in** — required for **Generate** (the extractor reads
-  your account's ticket from the live Steam session). Redeeming doesn't need it.
-- `extract_tickets.exe` must sit next to `tokeer_drm.py` (and is bundled into the
-  built `.exe`).
 
-## Run from source
+Windows 10 or 11 with the Edge WebView2 runtime. Win11 already has it, on older
+systems grab it from Microsoft (it's free).
+
+Steam has to be running and signed in for Generate, since the extractor pulls the
+ticket out of the live session. Redeeming works without it.
+
+`extract_tickets.exe` needs to sit next to `tokeer_drm.py`. It's bundled into the
+built exe already.
+
+## Running it
+
 ```bat
 pip install -r requirements.txt
 python tokeer_drm.py
 ```
 
-## Build a single .exe
+## Building
+
 ```bat
 pip install -r requirements.txt pyinstaller
 build.bat
 ```
-Output: `dist\TokeerDRM.exe` — a single, no-console file you can share.
+
+You get `dist\TokeerDRM.exe`, single file, no console window.
 
 ## Notes
-- Server: set your code-store URL in `server_config.py` (copy `server_config.example.py`).
-- Generate only works for games your account **genuinely owns** — the server
-  verifies the App Ownership Ticket's Steam signature, so spoofed/unlocker games
-  are rejected with "you don't own this game."
-- Whoever redeems a code should apply it and launch reasonably soon (the underlying
-  Steam ticket is short-lived).
+
+Copy `server_config.example.py` to `server_config.py` and put your code store URL
+in it.
+
+Codes are single use and the Steam ticket behind them only lasts about half an
+hour, so redeem and launch around the same time. If you leave it too long you'll
+get 88500005 and need a fresh one.
