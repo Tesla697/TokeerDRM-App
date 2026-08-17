@@ -86,10 +86,12 @@ spends their own quota.
 
 ```
 curl https://luastools.xyz/ost/latest
-curl -sI https://luastools.xyz/ost/dll | head -3
+curl -sI "https://luastools.xyz/ost/asset?tag=v1.0.0&name=OpenSteamTool-v1.0.0-Release.zip"
 ```
 
-`/ost/latest` returns `{ok, tag, hashes[], size, dll}`; `/ost/dll?tag=<tag>` returns
-the DLL bytes. The app prefers this mirror and falls back to GitHub automatically if
+`/ost/latest` mirrors the GitHub release JSON (`tag_name` + `assets[]`) with each
+asset URL rewritten to `/ost/asset?tag=&name=`, so the app's existing logic works
+unchanged. This repo ships the DLL inside `OpenSteamTool-<tag>-Release.zip` rather
+than as a bare `.dll`, which the app already knows how to unpack. The app prefers this mirror and falls back to GitHub automatically if
 it's unreachable, so a worker outage degrades to the old behaviour instead of
 breaking installs.

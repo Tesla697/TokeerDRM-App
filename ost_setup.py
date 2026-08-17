@@ -34,16 +34,15 @@ OST_RELEASES_API = "https://api.github.com/repos/OpenSteam001/OpenSteamTool/rele
 # that need a launch-nonce-bound ticket fail with 88500012.
 CUSTOM_OST_REPO   = "madoiscool/BetterSteamTools"
 CUSTOM_OST_API    = f"https://api.github.com/repos/{CUSTOM_OST_REPO}/releases/latest"
-# Same file, no API call. GitHub's 60-per-hour-per-IP limit only applies to
-# api.github.com, so this keeps installs working for users who share an ISP/CGNAT
-# address with enough other people to burn the API quota.
-CUSTOM_OST_DIRECT = f"https://github.com/{CUSTOM_OST_REPO}/releases/latest/download/OpenSteamTool.dll"
 # Preferred source: our own Cloudflare worker (redeem-redirect/ost-release.worker.js).
-# It asks GitHub once per cache window and serves everyone from the edge, so a user
-# never spends their IP's GitHub quota. GitHub stays as the fallback for anyone who
-# can't reach luastools.xyz.
-OST_PROXY_META = "https://luastools.xyz/ost/latest"
-OST_PROXY_DLL  = "https://luastools.xyz/ost/dll"
+# It mirrors the release JSON (asset URLs rewritten to point back at the worker), asks
+# GitHub once per cache window, and serves everyone from Cloudflare's edge, so a user
+# never spends their IP's GitHub quota. api.github.com stays as the fallback for
+# anyone who can't reach luastools.xyz.
+# NOTE: this repo publishes the DLL inside OpenSteamTool-<tag>-Release.zip, not as a
+# bare .dll asset, so there is no /releases/latest/download/OpenSteamTool.dll to fall
+# back to. The asset name is remembered per tag instead (see _gh_meta).
+OST_PROXY_RELEASE = "https://luastools.xyz/ost/latest"
 # On-demand eticket mint endpoint (Cloudflare-fronted; origin IP hidden, rate
 # limited). Written into a lua so the BetterSteamTools DLL enables minting.
 ETICKET_URL       = "https://luastools.xyz/eticket"
@@ -1302,39 +1301,63 @@ def _download_dll_hashes(rel_data):
         except Exception:
             continue
         if is_zip:
-            try:
-                with zipfile.ZipFile(io.BytesIO(raw)) as z:
-                    for n in z.namelist():
-                        if os.path.basename(n).lower() == "opensteamtool.dll":
-                            hashes.add(_sha256_bytes(z.read(n)))
-            except Exception:
-                pass
+            inner = _dll_from_zip(raw)
+            if inner:
+                hashes.add(_sha256_bytes(inner))
         else:
             hashes.add(_sha256_bytes(raw))
     return hashes
 
 
-def _proxy_latest(timeout=10):
-    """(tag, frozenset of sha256 hex) from our Cloudflare worker, or ("", frozenset())
-    if it's unreachable or answers with anything we don't fully understand. Never
-    raises, so a proxy problem just falls through to GitHub."""
+def _release_json(timeout=15):
+    """The latest custom release, shaped exactly like GitHub's API response
+    (tag_name + assets[] with browser_download_url), so every caller below works the
+    same whichever source answered.
+
+    Our worker first: it can't rate-limit an individual user, and the asset URLs it
+    hands back are proxied too, so the download avoids GitHub as well. Falls through
+    to api.github.com if the mirror is unreachable or answers with anything unusable.
+    Returns None when neither source could be read."""
     try:
-        req = urllib.request.Request(OST_PROXY_META, headers={"User-Agent": "TokeerDRM"})
+        req = urllib.request.Request(OST_PROXY_RELEASE, headers={"User-Agent": "TokeerDRM"})
         data = json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
+        if isinstance(data, dict) and data.get("ok") and data.get("tag_name") and data.get("assets"):
+            return data
     except Exception:
-        return "", frozenset()
-    if not isinstance(data, dict) or not data.get("ok"):
-        return "", frozenset()
-    tag = str(data.get("tag") or "")
-    hashes = frozenset(
-        h.lower() for h in (data.get("hashes") or [])
-        if isinstance(h, str) and len(h) == 64
+        pass
+
+    try:
+        req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
+        return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
+    except Exception as e:
+        _note_rate_limit(_rate_limit_reset(e))
+        return None
+
+
+def _pick_dll_asset(rel_data):
+    """The asset carrying OpenSteamTool.dll: a bare .dll when one is published, else
+    the Release zip (which is what this repo actually ships). Returns (asset, is_zip)."""
+    assets = (rel_data or {}).get("assets", []) or []
+    dll = next((a for a in assets if (a.get("name", "").lower() == "opensteamtool.dll")), None)
+    if dll:
+        return dll, False
+    zip_asset = next(
+        (a for a in assets
+         if "release" in a.get("name", "").lower() and a.get("name", "").lower().endswith(".zip")),
+        None,
     )
-    # A release with no usable digests would make custom_dll_installed() answer
-    # "not ours" for everyone, so treat that as no answer and let GitHub decide.
-    if not tag or not hashes:
-        return "", frozenset()
-    return tag, hashes
+    return zip_asset, bool(zip_asset)
+
+
+def _dll_from_zip(raw):
+    """OpenSteamTool.dll out of a release zip, or b"" if it isn't in there."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            entry = next((n for n in z.namelist()
+                          if os.path.basename(n).lower() == "opensteamtool.dll"), None)
+            return z.read(entry) if entry else b""
+    except Exception:
+        return b""
 
 
 _latest_custom_cache = {"at": 0.0, "tag": "", "hashes": frozenset()}
@@ -1361,23 +1384,13 @@ def _latest_custom_dll(timeout=10):
         _latest_custom_cache.update(at=now, tag=disk_tag, hashes=disk_hashes)
         return disk_tag, disk_hashes
 
-    # Our proxy first: it can't rate-limit an individual user. Only fall through to
-    # GitHub if it's unreachable or answers with something unusable.
-    tag, hashes = _proxy_latest(timeout)
-    if tag:
-        _latest_custom_cache.update(at=now, tag=tag, hashes=hashes)
-        _write_gh_meta({"tag": tag, "hashes": sorted(hashes), "at": now})
-        return tag, hashes
-
-    try:
-        req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
-        data = json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
-    except Exception as e:
-        _note_rate_limit(_rate_limit_reset(e))
+    data = _release_json(timeout)
+    if data is None:
         if disk_tag:
             _latest_custom_cache.update(at=now, tag=disk_tag, hashes=disk_hashes)
             return disk_tag, disk_hashes
         return _latest_custom_cache["tag"], _latest_custom_cache["hashes"]  # stale or empty
+
     tag = data.get("tag_name", "") or ""
     hashes = _release_dll_hashes(data)
     if not hashes and tag:  # no digests — fall back to download+disk-cache (once per tag)
@@ -1391,8 +1404,12 @@ def _latest_custom_dll(timeout=10):
                 _write_hash_cache(cache)
     if tag:
         _latest_custom_cache.update(at=now, tag=tag, hashes=frozenset(hashes))
+        # Remember the asset too, so a rate-limited install can still build a direct
+        # download URL (this repo's zip name carries the version, so it isn't guessable).
+        asset, _ = _pick_dll_asset(data)
         # Fresh answer, so drop any rate-limit note along with it.
-        _write_gh_meta({"tag": tag, "hashes": sorted(hashes), "at": now})
+        _write_gh_meta({"tag": tag, "hashes": sorted(hashes), "at": now,
+                        "asset": (asset or {}).get("name", "")})
     return tag, frozenset(hashes)
 
 
@@ -1547,62 +1564,43 @@ def install_custom_dll(progress=_noop, restart_steam=True):
         return {"ok": False, "message": "Steam not found."}
 
     progress(8, "Finding latest custom OpenSteamTool release…")
-    data = None
-    # Our worker serves the same DLL from Cloudflare's edge, so this path doesn't
-    # touch the user's GitHub quota at all. Tag-pinned so the bytes always match
-    # the hashes custom_dll_installed() checks against.
-    proxy_tag, _ = _proxy_latest(timeout=15)
-    if proxy_tag:
-        proxy_url = f"{OST_PROXY_DLL}?tag={urllib.parse.quote(proxy_tag)}"
-        raw = _download_bytes(proxy_url, progress, lo=15, hi=60)
-        if raw:
-            return _write_custom_dll(sp, raw, proxy_tag, progress, restart_steam)
-        progress(12, "Mirror unavailable, falling back to GitHub…")
+    # _release_json prefers our Cloudflare mirror, whose asset URLs are proxied too,
+    # so both the lookup and the download stay off the user's GitHub quota.
+    data = _release_json(timeout=30)
 
-    try:
-        req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
-        data = json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
-    except Exception as e:
-        # The API is only needed to NAME the asset. The release file itself lives on
-        # github.com, which the API rate limit doesn't cover, so a limited user can
-        # still install from the direct link instead of being told to come back later.
-        rl = _rate_limit_reset(e)
-        _note_rate_limit(rl)
-        if not rl:
-            return {"ok": False, "message": f"Couldn't reach GitHub: {e}"}
-        progress(12, "GitHub API is rate limited, using the direct release link…")
-
-    asset = zip_asset = None
+    tag = ""
+    url = ""
+    is_zip = False
     if data is not None:
-        # Try standalone .dll asset first, then a release zip.
-        asset = next((a for a in data.get("assets", [])
-                      if a.get("name", "").lower() == "opensteamtool.dll"), None)
-        zip_asset = None if asset else next(
-            (a for a in data.get("assets", [])
-             if "release" in a.get("name", "").lower() and a["name"].lower().endswith(".zip")), None)
-
-        if not asset and not zip_asset:
-            return {"ok": False, "message": "Custom DLL not found in the GitHub release assets."}
+        tag = data.get("tag_name", "") or ""
+        asset, is_zip = _pick_dll_asset(data)
+        if not asset:
+            return {"ok": False, "message": "Custom DLL not found in the release assets."}
+        url = asset.get("browser_download_url") or ""
+    else:
+        # Both sources are unreachable (usually a rate limit with nothing cached yet).
+        # We can still install if a previous run recorded which asset to fetch, since
+        # the file itself lives on github.com and isn't covered by the API quota.
+        meta = _read_gh_meta()
+        tag = meta.get("tag") or ""
+        name = meta.get("asset") or ""
+        if not tag or not name:
+            return {"ok": False, "message": "Couldn't reach GitHub or the mirror. Try again shortly."}
+        url = f"https://github.com/{CUSTOM_OST_REPO}/releases/download/{urllib.parse.quote(tag)}/{urllib.parse.quote(name)}"
+        is_zip = name.lower().endswith(".zip")
+        progress(12, "Using the last known release link…")
 
     progress(15, "Downloading custom OpenSteamTool.dll…")
-    url = (asset or zip_asset)["browser_download_url"] if data is not None else CUSTOM_OST_DIRECT
     raw = _download_bytes(url, progress, lo=15, hi=60)
     if not raw:
         return {"ok": False, "message": "Couldn't download custom DLL."}
 
-    # Extract from zip if needed.
-    if zip_asset:
-        try:
-            with zipfile.ZipFile(io.BytesIO(raw)) as z:
-                entry = next((n for n in z.namelist()
-                              if os.path.basename(n).lower() == "opensteamtool.dll"), None)
-                if not entry:
-                    return {"ok": False, "message": "opensteamtool.dll not found in the release zip."}
-                raw = z.read(entry)
-        except Exception as e:
-            return {"ok": False, "message": f"Couldn't extract DLL from zip: {e}"}
+    if is_zip:
+        raw = _dll_from_zip(raw)
+        if not raw:
+            return {"ok": False, "message": "opensteamtool.dll not found in the release zip."}
 
-    return _write_custom_dll(sp, raw, (data or {}).get("tag_name", ""), progress, restart_steam)
+    return _write_custom_dll(sp, raw, tag, progress, restart_steam)
 
 
 if __name__ == "__main__":
