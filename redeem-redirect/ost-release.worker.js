@@ -48,21 +48,40 @@ const ASSET_TTL = 86400;   // assets are tag-pinned and never change, hold a day
 const SAFE_NAME = /^[A-Za-z0-9._-]{1,120}$/;
 const SAFE_TAG = /^[A-Za-z0-9._-]{1,64}$/;
 
-function json(body, status = 200, ttl = 0) {
+function json(body, status = 200, ttl = 0, extra = {}) {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": ttl ? `public, max-age=${ttl}` : "no-store",
       "access-control-allow-origin": "*",
+      ...extra,
     },
   });
 }
 
-function ghHeaders(env) {
+function ghHeaders(env, withToken = true) {
   const h = { "User-Agent": UA, Accept: "application/vnd.github+json" };
-  if (env && env.GITHUB_TOKEN) h.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
+  if (withToken && env && env.GITHUB_TOKEN) {
+    h.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
+  }
   return h;
+}
+
+/**
+ * Ask GitHub, and if a token is configured but rejected (401, or a 403 that isn't
+ * a plain rate limit) retry once anonymously. An expired or mistyped secret should
+ * cost us the higher quota, not take the whole mirror down.
+ */
+async function askGitHub(url, env) {
+  let res = await fetch(url, { headers: ghHeaders(env) });
+  const used = Boolean(env && env.GITHUB_TOKEN);
+  if (used && (res.status === 401 || res.status === 403)) {
+    const retry = await fetch(url, { headers: ghHeaders(env, false) });
+    if (retry.ok) return { res: retry, auth: "rejected" };
+    return { res, auth: "rejected" };
+  }
+  return { res, auth: used ? "token" : "anonymous" };
 }
 
 /**
@@ -75,22 +94,38 @@ async function latestRelease(request, env, ctx) {
   const key = new Request(new URL("/__ost/latest.json", request.url).toString());
 
   const hit = await cache.match(key);
-  if (hit) return hit;
+  if (hit) {
+    const h = new Response(hit.body, hit);
+    h.headers.set("x-ost-cache", "HIT");
+    return h;
+  }
 
-  let res;
+  let res, auth;
   try {
-    res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
-      headers: ghHeaders(env),
-    });
+    ({ res, auth } = await askGitHub(
+      `https://api.github.com/repos/${REPO}/releases/latest`,
+      env
+    ));
   } catch (e) {
     return json({ ok: false, error: `github unreachable: ${e}` }, 502);
   }
   if (!res.ok) {
     return json(
       { ok: false, error: `github returned ${res.status}`, status: res.status },
-      502
+      502,
+      0,
+      { "x-ost-cache": "MISS", "x-ost-auth": auth }
     );
   }
+
+  // Surfaced so the deployment can be checked from outside: x-gh-limit reads 60
+  // when we're anonymous and 5000 when the token is accepted.
+  const diag = {
+    "x-ost-cache": "MISS",
+    "x-ost-auth": auth,
+    "x-gh-limit": res.headers.get("x-ratelimit-limit") || "?",
+    "x-gh-remaining": res.headers.get("x-ratelimit-remaining") || "?",
+  };
 
   const rel = await res.json();
   const tag = rel.tag_name || "";
@@ -108,7 +143,8 @@ async function latestRelease(request, env, ctx) {
   const out = json(
     { ok: true, tag_name: tag, published_at: rel.published_at || "", assets },
     200,
-    META_TTL
+    META_TTL,
+    diag
   );
   ctx.waitUntil(cache.put(key, out.clone()));
   return out;
