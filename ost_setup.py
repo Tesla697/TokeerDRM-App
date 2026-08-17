@@ -33,6 +33,10 @@ OST_RELEASES_API = "https://api.github.com/repos/OpenSteam001/OpenSteamTool/rele
 # that need a launch-nonce-bound ticket fail with 88500012.
 CUSTOM_OST_REPO   = "madoiscool/BetterSteamTools"
 CUSTOM_OST_API    = f"https://api.github.com/repos/{CUSTOM_OST_REPO}/releases/latest"
+# Same file, no API call. GitHub's 60-per-hour-per-IP limit only applies to
+# api.github.com, so this keeps installs working for users who share an ISP/CGNAT
+# address with enough other people to burn the API quota.
+CUSTOM_OST_DIRECT = f"https://github.com/{CUSTOM_OST_REPO}/releases/latest/download/OpenSteamTool.dll"
 # On-demand eticket mint endpoint (Cloudflare-fronted; origin IP hidden, rate
 # limited). Written into a lua so the BetterSteamTools DLL enables minting.
 ETICKET_URL       = "https://luastools.xyz/eticket"
@@ -1207,6 +1211,60 @@ def _write_hash_cache(cache):
         pass
 
 
+_GH_META_TTL = 6 * 3600  # how long the on-disk copy of the latest-release lookup counts as fresh
+
+
+def _gh_meta_file():
+    base = (os.environ.get("PUBLIC") or os.environ.get("TEMP")
+            or os.environ.get("TMP") or os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, "tokeerdrm_gh_meta.json")
+
+
+def _read_gh_meta():
+    try:
+        with open(_gh_meta_file(), "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def _write_gh_meta(meta):
+    try:
+        with open(_gh_meta_file(), "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+    except Exception:
+        pass
+
+
+def _rate_limit_reset(err, default_backoff=900):
+    """Epoch seconds until GitHub's per-IP API limit lifts, or 0 when `err` isn't a
+    rate-limit rejection. Unauthenticated callers get 60 requests an hour, counted per
+    source IP, so users sharing a CGNAT address hit this without doing anything wrong.
+    GitHub answers 403 (sometimes 429) with X-RateLimit-Remaining: 0 and the reset
+    time; fall back to a fixed backoff when the headers aren't readable."""
+    if getattr(err, "code", None) not in (403, 429):
+        return 0
+    try:
+        hdrs = getattr(err, "headers", None)
+        if hdrs is not None and (hdrs.get("X-RateLimit-Remaining") or "").strip() == "0":
+            reset = float((hdrs.get("X-RateLimit-Reset") or "").strip() or 0)
+            if reset > time.time():
+                return reset
+    except Exception:
+        pass
+    return time.time() + default_backoff
+
+
+def _note_rate_limit(reset_at):
+    """Remember that GitHub is rate-limiting this machine, so the next check serves
+    the cached answer instead of spending another request on a guaranteed 403."""
+    if not reset_at:
+        return
+    meta = _read_gh_meta()
+    meta["rl_until"] = reset_at
+    _write_gh_meta(meta)
+
+
 def _release_dll_hashes(rel_data):
     """sha256 hex of every OpenSteamTool.dll in a release — taken from each asset's
     `digest` field so NOTHING is downloaded. Returns a set (empty if GitHub didn't
@@ -1260,10 +1318,27 @@ def _latest_custom_dll(timeout=10):
     now = time.time()
     if _latest_custom_cache["tag"] and (now - _latest_custom_cache["at"]) < 600:
         return _latest_custom_cache["tag"], _latest_custom_cache["hashes"]
+
+    # The in-process cache dies with the app, so a user who reopens TokeerDRM a few
+    # times used to spend a GitHub request on every launch. Keep the answer on disk
+    # too, and while GitHub is rate-limiting this IP serve it regardless of age
+    # rather than burning more requests on certain 403s.
+    meta = _read_gh_meta()
+    disk_tag = meta.get("tag") or ""
+    disk_hashes = frozenset(meta.get("hashes") or ())
+    rate_limited = now < float(meta.get("rl_until") or 0)
+    if disk_tag and (rate_limited or (now - float(meta.get("at") or 0)) < _GH_META_TTL):
+        _latest_custom_cache.update(at=now, tag=disk_tag, hashes=disk_hashes)
+        return disk_tag, disk_hashes
+
     try:
         req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
         data = json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
-    except Exception:
+    except Exception as e:
+        _note_rate_limit(_rate_limit_reset(e))
+        if disk_tag:
+            _latest_custom_cache.update(at=now, tag=disk_tag, hashes=disk_hashes)
+            return disk_tag, disk_hashes
         return _latest_custom_cache["tag"], _latest_custom_cache["hashes"]  # stale or empty
     tag = data.get("tag_name", "") or ""
     hashes = _release_dll_hashes(data)
@@ -1278,6 +1353,8 @@ def _latest_custom_dll(timeout=10):
                 _write_hash_cache(cache)
     if tag:
         _latest_custom_cache.update(at=now, tag=tag, hashes=frozenset(hashes))
+        # Fresh answer, so drop any rate-limit note along with it.
+        _write_gh_meta({"tag": tag, "hashes": sorted(hashes), "at": now})
     return tag, frozenset(hashes)
 
 
@@ -1370,25 +1447,35 @@ def install_custom_dll(progress=_noop, restart_steam=True):
         return {"ok": False, "message": "Steam not found."}
 
     progress(8, "Finding latest custom OpenSteamTool release…")
+    data = None
     try:
         req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
         data = json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
     except Exception as e:
-        return {"ok": False, "message": f"Couldn't reach GitHub: {e}"}
+        # The API is only needed to NAME the asset. The release file itself lives on
+        # github.com, which the API rate limit doesn't cover, so a limited user can
+        # still install from the direct link instead of being told to come back later.
+        rl = _rate_limit_reset(e)
+        _note_rate_limit(rl)
+        if not rl:
+            return {"ok": False, "message": f"Couldn't reach GitHub: {e}"}
+        progress(12, "GitHub API is rate limited, using the direct release link…")
 
-    # Try standalone .dll asset first, then a release zip.
-    asset = next((a for a in data.get("assets", [])
-                  if a.get("name", "").lower() == "opensteamtool.dll"), None)
-    zip_asset = None if asset else next(
-        (a for a in data.get("assets", [])
-         if "release" in a.get("name", "").lower() and a["name"].lower().endswith(".zip")), None)
+    asset = zip_asset = None
+    if data is not None:
+        # Try standalone .dll asset first, then a release zip.
+        asset = next((a for a in data.get("assets", [])
+                      if a.get("name", "").lower() == "opensteamtool.dll"), None)
+        zip_asset = None if asset else next(
+            (a for a in data.get("assets", [])
+             if "release" in a.get("name", "").lower() and a["name"].lower().endswith(".zip")), None)
 
-    if not asset and not zip_asset:
-        return {"ok": False, "message": "Custom DLL not found in the GitHub release assets."}
+        if not asset and not zip_asset:
+            return {"ok": False, "message": "Custom DLL not found in the GitHub release assets."}
 
     progress(15, "Downloading custom OpenSteamTool.dll…")
     try:
-        url = (asset or zip_asset)["browser_download_url"]
+        url = (asset or zip_asset)["browser_download_url"] if data is not None else CUSTOM_OST_DIRECT
         req = urllib.request.Request(url, headers={"User-Agent": "TokeerDRM"})
         resp = urllib.request.urlopen(req, timeout=120)
         total = int(resp.headers.get("Content-Length") or 0)
@@ -1427,7 +1514,7 @@ def install_custom_dll(progress=_noop, restart_steam=True):
         with open(os.path.join(sp, "OpenSteamTool.dll"), "wb") as f:
             f.write(raw)
         with open(os.path.join(sp, _CUSTOM_MARKER), "w", encoding="utf-8") as f:
-            f.write(_marker_content(raw, data.get("tag_name", "")))
+            f.write(_marker_content(raw, (data or {}).get("tag_name", "")))
     except PermissionError:
         _start_steam(sp)
         return {"ok": False, "message": "Permission denied writing to Steam folder. Run as Administrator."}
