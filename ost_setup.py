@@ -23,6 +23,7 @@ import json
 import time
 import zipfile
 import subprocess
+import urllib.parse
 import urllib.request
 
 OST_RELEASES_API = "https://api.github.com/repos/OpenSteam001/OpenSteamTool/releases/latest"
@@ -37,6 +38,12 @@ CUSTOM_OST_API    = f"https://api.github.com/repos/{CUSTOM_OST_REPO}/releases/la
 # api.github.com, so this keeps installs working for users who share an ISP/CGNAT
 # address with enough other people to burn the API quota.
 CUSTOM_OST_DIRECT = f"https://github.com/{CUSTOM_OST_REPO}/releases/latest/download/OpenSteamTool.dll"
+# Preferred source: our own Cloudflare worker (redeem-redirect/ost-release.worker.js).
+# It asks GitHub once per cache window and serves everyone from the edge, so a user
+# never spends their IP's GitHub quota. GitHub stays as the fallback for anyone who
+# can't reach luastools.xyz.
+OST_PROXY_META = "https://luastools.xyz/ost/latest"
+OST_PROXY_DLL  = "https://luastools.xyz/ost/dll"
 # On-demand eticket mint endpoint (Cloudflare-fronted; origin IP hidden, rate
 # limited). Written into a lua so the BetterSteamTools DLL enables minting.
 ETICKET_URL       = "https://luastools.xyz/eticket"
@@ -1307,6 +1314,29 @@ def _download_dll_hashes(rel_data):
     return hashes
 
 
+def _proxy_latest(timeout=10):
+    """(tag, frozenset of sha256 hex) from our Cloudflare worker, or ("", frozenset())
+    if it's unreachable or answers with anything we don't fully understand. Never
+    raises, so a proxy problem just falls through to GitHub."""
+    try:
+        req = urllib.request.Request(OST_PROXY_META, headers={"User-Agent": "TokeerDRM"})
+        data = json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
+    except Exception:
+        return "", frozenset()
+    if not isinstance(data, dict) or not data.get("ok"):
+        return "", frozenset()
+    tag = str(data.get("tag") or "")
+    hashes = frozenset(
+        h.lower() for h in (data.get("hashes") or [])
+        if isinstance(h, str) and len(h) == 64
+    )
+    # A release with no usable digests would make custom_dll_installed() answer
+    # "not ours" for everyone, so treat that as no answer and let GitHub decide.
+    if not tag or not hashes:
+        return "", frozenset()
+    return tag, hashes
+
+
 _latest_custom_cache = {"at": 0.0, "tag": "", "hashes": frozenset()}
 
 
@@ -1330,6 +1360,14 @@ def _latest_custom_dll(timeout=10):
     if disk_tag and (rate_limited or (now - float(meta.get("at") or 0)) < _GH_META_TTL):
         _latest_custom_cache.update(at=now, tag=disk_tag, hashes=disk_hashes)
         return disk_tag, disk_hashes
+
+    # Our proxy first: it can't rate-limit an individual user. Only fall through to
+    # GitHub if it's unreachable or answers with something unusable.
+    tag, hashes = _proxy_latest(timeout)
+    if tag:
+        _latest_custom_cache.update(at=now, tag=tag, hashes=hashes)
+        _write_gh_meta({"tag": tag, "hashes": sorted(hashes), "at": now})
+        return tag, hashes
 
     try:
         req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
@@ -1440,6 +1478,66 @@ def custom_dll_needs_update(sp=None):
     return dll_hash not in latest_hashes
 
 
+def _download_bytes(url, progress=_noop, lo=15, hi=60, timeout=120):
+    """Fetch a URL with progress between lo% and hi%. Returns b"" on any failure so
+    the caller can try the next source instead of aborting the install."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "TokeerDRM"})
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        total = int(resp.headers.get("Content-Length") or 0)
+        buf = io.BytesIO()
+        got = 0
+        while True:
+            chunk = resp.read(65536)
+            if not chunk:
+                break
+            buf.write(chunk)
+            got += len(chunk)
+            if total:
+                progress(lo + int(got * (hi - lo) / total), "Downloading…")
+        return buf.getvalue()
+    except Exception:
+        return b""
+
+
+def _write_custom_dll(sp, raw, tag, progress=_noop, restart_steam=True):
+    """Shut Steam down, drop the DLL + marker in place, and bring Steam back.
+    Shared by every source we can get the DLL from (worker mirror or GitHub)."""
+    if not raw:
+        return {"ok": False, "message": "Couldn't download custom DLL."}
+
+    progress(62, "Closing Steam…")
+    _shutdown_steam(sp, progress, lo=62, hi=74)
+
+    progress(75, "Installing custom OpenSteamTool.dll…")
+    try:
+        _add_defender_exclusion(sp)
+        with open(os.path.join(sp, "OpenSteamTool.dll"), "wb") as f:
+            f.write(raw)
+        with open(os.path.join(sp, _CUSTOM_MARKER), "w", encoding="utf-8") as f:
+            f.write(_marker_content(raw, tag or ""))
+    except PermissionError:
+        _start_steam(sp)
+        return {"ok": False, "message": "Permission denied writing to Steam folder. Run as Administrator."}
+    except OSError as e:
+        if getattr(e, "winerror", None) == 225 or "virus" in str(e).lower():
+            _start_steam(sp)
+            return {"ok": False, "defender": True, "message": LUATOOLS_HINT, "url": LUATOOLS_URL}
+        _start_steam(sp)
+        return {"ok": False, "message": f"Couldn't install custom DLL: {e}"}
+
+    # The BetterSteamTools DLL ships with eticket minting compiled out; enable it
+    # via the seteticketurl lua so strict-Denuvo redeems keep working after a
+    # core-only swap (this path doesn't go through _ensure_toml).
+    _ensure_stplugin_dir(sp)
+
+    if restart_steam:
+        progress(90, "Restarting Steam…")
+        _start_steam(sp)
+    progress(100, "Custom DLL installed.")
+    return {"ok": True, "message": "Enhanced DLL installed. Sign in to Steam, then launch your game."}
+
+
 def install_custom_dll(progress=_noop, restart_steam=True):
     """Download our fork's OpenSteamTool.dll and replace the official one.
     Assumes the engine (proxy DLLs) is already installed — only swaps the core.
@@ -1450,6 +1548,17 @@ def install_custom_dll(progress=_noop, restart_steam=True):
 
     progress(8, "Finding latest custom OpenSteamTool release…")
     data = None
+    # Our worker serves the same DLL from Cloudflare's edge, so this path doesn't
+    # touch the user's GitHub quota at all. Tag-pinned so the bytes always match
+    # the hashes custom_dll_installed() checks against.
+    proxy_tag, _ = _proxy_latest(timeout=15)
+    if proxy_tag:
+        proxy_url = f"{OST_PROXY_DLL}?tag={urllib.parse.quote(proxy_tag)}"
+        raw = _download_bytes(proxy_url, progress, lo=15, hi=60)
+        if raw:
+            return _write_custom_dll(sp, raw, proxy_tag, progress, restart_steam)
+        progress(12, "Mirror unavailable, falling back to GitHub…")
+
     try:
         req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
         data = json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
@@ -1476,24 +1585,10 @@ def install_custom_dll(progress=_noop, restart_steam=True):
             return {"ok": False, "message": "Custom DLL not found in the GitHub release assets."}
 
     progress(15, "Downloading custom OpenSteamTool.dll…")
-    try:
-        url = (asset or zip_asset)["browser_download_url"] if data is not None else CUSTOM_OST_DIRECT
-        req = urllib.request.Request(url, headers={"User-Agent": "TokeerDRM"})
-        resp = urllib.request.urlopen(req, timeout=120)
-        total = int(resp.headers.get("Content-Length") or 0)
-        buf = io.BytesIO()
-        got = 0
-        while True:
-            chunk = resp.read(65536)
-            if not chunk:
-                break
-            buf.write(chunk)
-            got += len(chunk)
-            if total:
-                progress(15 + int(got * 45 / total), "Downloading…")
-        raw = buf.getvalue()
-    except Exception as e:
-        return {"ok": False, "message": f"Couldn't download custom DLL: {e}"}
+    url = (asset or zip_asset)["browser_download_url"] if data is not None else CUSTOM_OST_DIRECT
+    raw = _download_bytes(url, progress, lo=15, hi=60)
+    if not raw:
+        return {"ok": False, "message": "Couldn't download custom DLL."}
 
     # Extract from zip if needed.
     if zip_asset:
@@ -1507,36 +1602,7 @@ def install_custom_dll(progress=_noop, restart_steam=True):
         except Exception as e:
             return {"ok": False, "message": f"Couldn't extract DLL from zip: {e}"}
 
-    progress(62, "Closing Steam…")
-    _shutdown_steam(sp, progress, lo=62, hi=74)
-
-    progress(75, "Installing custom OpenSteamTool.dll…")
-    try:
-        _add_defender_exclusion(sp)
-        with open(os.path.join(sp, "OpenSteamTool.dll"), "wb") as f:
-            f.write(raw)
-        with open(os.path.join(sp, _CUSTOM_MARKER), "w", encoding="utf-8") as f:
-            f.write(_marker_content(raw, (data or {}).get("tag_name", "")))
-    except PermissionError:
-        _start_steam(sp)
-        return {"ok": False, "message": "Permission denied writing to Steam folder. Run as Administrator."}
-    except OSError as e:
-        if getattr(e, "winerror", None) == 225 or "virus" in str(e).lower():
-            _start_steam(sp)
-            return {"ok": False, "defender": True, "message": LUATOOLS_HINT, "url": LUATOOLS_URL}
-        _start_steam(sp)
-        return {"ok": False, "message": f"Couldn't install custom DLL: {e}"}
-
-    # The BetterSteamTools DLL ships with eticket minting compiled out; enable it
-    # via the seteticketurl lua so strict-Denuvo redeems keep working after a
-    # core-only swap (this path doesn't go through _ensure_toml).
-    _ensure_stplugin_dir(sp)
-
-    if restart_steam:
-        progress(90, "Restarting Steam…")
-        _start_steam(sp)
-    progress(100, "Custom DLL installed.")
-    return {"ok": True, "message": "Enhanced DLL installed. Sign in to Steam, then launch your game."}
+    return _write_custom_dll(sp, raw, (data or {}).get("tag_name", ""), progress, restart_steam)
 
 
 if __name__ == "__main__":
