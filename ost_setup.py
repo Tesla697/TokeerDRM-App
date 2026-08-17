@@ -1463,17 +1463,34 @@ def custom_dll_installed(sp=None):
         return True
 
     # 3) Is it an older-but-still-ours build (matches the stored tag's release)?
-    # Skipped while GitHub is rate-limiting us: the request would 403 anyway, and
+    if not stored_tag or stored_tag == latest_tag:
+        return False
+
+    # The hash cache is already keyed by tag, so a machine that has seen this build
+    # before answers offline. Only an unknown tag needs the network.
+    cached = _read_hash_cache().get(stored_tag)
+    if cached:
+        return dll_hash in set(cached)
+
+    # This lookup is for one specific older tag, which the mirror doesn't serve
+    # (it only publishes the latest release), so it goes straight to GitHub.
+    # Skipped while we're being rate-limited: the request would 403 anyway, and
     # spending it here just keeps the window alive for the checks that matter.
-    if stored_tag and stored_tag != latest_tag and time.time() >= float(_read_gh_meta().get("rl_until") or 0):
-        try:
-            tag_api = f"https://api.github.com/repos/{CUSTOM_OST_REPO}/releases/tags/{stored_tag}"
-            req = urllib.request.Request(tag_api, headers={"User-Agent": "TokeerDRM"})
-            rel = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
-            if dll_hash in _release_dll_hashes(rel):
-                return True
-        except Exception as e:
-            _note_rate_limit(_rate_limit_reset(e))
+    if time.time() < float(_read_gh_meta().get("rl_until") or 0):
+        return False
+    try:
+        tag_api = f"https://api.github.com/repos/{CUSTOM_OST_REPO}/releases/tags/{stored_tag}"
+        req = urllib.request.Request(tag_api, headers={"User-Agent": "TokeerDRM"})
+        rel = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+        hashes = _release_dll_hashes(rel) or _download_dll_hashes(rel)
+        if hashes:
+            # Remember it so this tag never costs another request on this machine.
+            cache = _read_hash_cache()
+            cache[stored_tag] = sorted(hashes)
+            _write_hash_cache(cache)
+        return dll_hash in hashes
+    except Exception as e:
+        _note_rate_limit(_rate_limit_reset(e))
 
     return False
 
