@@ -1408,15 +1408,17 @@ def custom_dll_installed(sp=None):
         return True
 
     # 3) Is it an older-but-still-ours build (matches the stored tag's release)?
-    if stored_tag and stored_tag != latest_tag:
+    # Skipped while GitHub is rate-limiting us: the request would 403 anyway, and
+    # spending it here just keeps the window alive for the checks that matter.
+    if stored_tag and stored_tag != latest_tag and time.time() >= float(_read_gh_meta().get("rl_until") or 0):
         try:
             tag_api = f"https://api.github.com/repos/{CUSTOM_OST_REPO}/releases/tags/{stored_tag}"
             req = urllib.request.Request(tag_api, headers={"User-Agent": "TokeerDRM"})
             rel = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
             if dll_hash in _release_dll_hashes(rel):
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            _note_rate_limit(_rate_limit_reset(e))
 
     return False
 
