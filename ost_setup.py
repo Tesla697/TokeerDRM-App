@@ -1217,7 +1217,15 @@ def _write_hash_cache(cache):
         pass
 
 
-_GH_META_TTL = 6 * 3600  # how long the on-disk copy of the latest-release lookup counts as fresh
+# How long the on-disk copy of the latest-release lookup counts as fresh, chosen by
+# whichever source answered last:
+#   mirror -> short. Asking our worker costs the user nothing (it's edge-cached and
+#     has no per-IP limit), so there's no reason to sit on a stale tag. This plus the
+#     worker's own 15 min window is how quickly a new release reaches people.
+#   github -> long. Only reached when the mirror is down, and every lookup there
+#     spends from the 60/hour the whole ISP shares, so conserve it.
+_META_TTL_MIRROR = 900        # 15 min
+_META_TTL_GITHUB = 6 * 3600   # 6 h
 
 
 def _gh_meta_file():
@@ -1317,21 +1325,23 @@ def _release_json(timeout=15):
     Our worker first: it can't rate-limit an individual user, and the asset URLs it
     hands back are proxied too, so the download avoids GitHub as well. Falls through
     to api.github.com if the mirror is unreachable or answers with anything unusable.
-    Returns None when neither source could be read."""
+
+    Returns (release_dict, source) where source is "mirror" or "github", or
+    (None, "") when neither could be read."""
     try:
         req = urllib.request.Request(OST_PROXY_RELEASE, headers={"User-Agent": "TokeerDRM"})
         data = json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
         if isinstance(data, dict) and data.get("ok") and data.get("tag_name") and data.get("assets"):
-            return data
+            return data, "mirror"
     except Exception:
         pass
 
     try:
         req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
-        return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
+        return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode()), "github"
     except Exception as e:
         _note_rate_limit(_rate_limit_reset(e))
-        return None
+        return None, ""
 
 
 def _pick_dll_asset(rel_data):
@@ -1380,11 +1390,12 @@ def _latest_custom_dll(timeout=10):
     disk_tag = meta.get("tag") or ""
     disk_hashes = frozenset(meta.get("hashes") or ())
     rate_limited = now < float(meta.get("rl_until") or 0)
-    if disk_tag and (rate_limited or (now - float(meta.get("at") or 0)) < _GH_META_TTL):
+    ttl = _META_TTL_MIRROR if meta.get("src") == "mirror" else _META_TTL_GITHUB
+    if disk_tag and (rate_limited or (now - float(meta.get("at") or 0)) < ttl):
         _latest_custom_cache.update(at=now, tag=disk_tag, hashes=disk_hashes)
         return disk_tag, disk_hashes
 
-    data = _release_json(timeout)
+    data, src = _release_json(timeout)
     if data is None:
         if disk_tag:
             _latest_custom_cache.update(at=now, tag=disk_tag, hashes=disk_hashes)
@@ -1407,9 +1418,10 @@ def _latest_custom_dll(timeout=10):
         # Remember the asset too, so a rate-limited install can still build a direct
         # download URL (this repo's zip name carries the version, so it isn't guessable).
         asset, _ = _pick_dll_asset(data)
-        # Fresh answer, so drop any rate-limit note along with it.
+        # Fresh answer, so drop any rate-limit note along with it. `src` decides how
+        # long this stays fresh (see _META_TTL_*).
         _write_gh_meta({"tag": tag, "hashes": sorted(hashes), "at": now,
-                        "asset": (asset or {}).get("name", "")})
+                        "asset": (asset or {}).get("name", ""), "src": src})
     return tag, frozenset(hashes)
 
 
@@ -1583,7 +1595,7 @@ def install_custom_dll(progress=_noop, restart_steam=True):
     progress(8, "Finding latest custom OpenSteamTool release…")
     # _release_json prefers our Cloudflare mirror, whose asset URLs are proxied too,
     # so both the lookup and the download stay off the user's GitHub quota.
-    data = _release_json(timeout=30)
+    data, _src = _release_json(timeout=30)
 
     tag = ""
     url = ""
