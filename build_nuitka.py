@@ -27,6 +27,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = sys.argv[1] if len(sys.argv) > 1 else r"C:\tkbuild"
 
 
+def app_version() -> str:
+    """APP_VERSION out of tokeer_drm.py. Read rather than hardcoded so the exe's
+    file version can't drift from the one the app shows in its footer."""
+    import re
+    src = open(os.path.join(HERE, "tokeer_drm.py"), encoding="utf-8").read()
+    m = re.search(r'^APP_VERSION\s*=\s*"([0-9.]+)"', src, re.M)
+    if not m:
+        raise SystemExit("[build] could not read APP_VERSION from tokeer_drm.py")
+    return m.group(1)
+
+
 def patch_pywebview_plugin() -> None:
     """Add webview.platforms.win32 to the Nuitka pywebview plugin's Windows
     allow-list. Idempotent — safe to run every build, and re-applies itself after
@@ -49,6 +60,8 @@ def patch_pywebview_plugin() -> None:
 def main() -> int:
     patch_pywebview_plugin()
     os.makedirs(OUT, exist_ok=True)
+    version = app_version()
+    print("[build] version", version)
     cmd = [
         sys.executable, "-m", "nuitka",
         "--onefile",
@@ -68,7 +81,7 @@ def main() -> int:
         "--output-filename=TokeerDRM.exe",
         "--company-name=LuaTools",
         "--product-name=TokeerDRM",
-        "--file-version=1.0.25",
+        "--file-version=" + version,
         "tokeer_drm.py",
     ]
     print("[build] output ->", OUT)
