@@ -4,9 +4,11 @@ Auto-configure Steam for a Tokeer Linux/Proton game - no manual Steam UI.
 
 Given an appid + the launch-option string, this:
   1. sets the game's **Launch Options** in every user's localconfig.vdf, and
-  2. if the game has no compatibility tool yet, forces the newest installed
-     Proton via config.vdf's CompatToolMapping (so a Windows-only Denuvo game
-     actually runs under Proton).
+  2. forces the game onto GE-Proton10-34 via config.vdf's CompatToolMapping,
+     downloading it into compatibilitytools.d first if it isn't installed. It
+     switches even when the game is already mapped to another Proton, because
+     the Denuvo hook needs the modern Proton ABI and an old build fails in ways
+     that look like a broken activation.
 
 Pure stdlib so it runs on the Steam Deck's system python. Steam MUST be closed
 while this runs (it rewrites these files on exit and would clobber our edits) -
@@ -182,10 +184,39 @@ def set_launch_options(path, appid, opts):
 # --------------------------------------------------------------------------- #
 # Proton (compat tool) auto-select
 # --------------------------------------------------------------------------- #
+TARGET_PROTON = "GE-Proton10-34"
+_GE_URL = ("https://github.com/GloriousEggroll/proton-ge-custom/releases/download/"
+           "{n}/{n}.tar.gz")
+_GE_SUM = ("https://github.com/GloriousEggroll/proton-ge-custom/releases/download/"
+           "{n}/{n}.sha512sum")
+
+
 def _proton_version_key(name):
     n = name.lower()
     nums = [int(x) for x in re.findall(r"\d+", n)] or [0]
     return (("ge-proton" in n or "cachyos" in n), nums)
+
+
+def compat_dirs(root):
+    """Every compatibilitytools.d worth looking in, most canonical first."""
+    out = []
+    for d in (os.path.join(root, "compatibilitytools.d"),
+              os.path.expanduser("~/.steam/root/compatibilitytools.d"),
+              os.path.expanduser("~/.local/share/Steam/compatibilitytools.d")):
+        if d not in out:
+            out.append(d)
+    return out
+
+
+def find_proton(root, name):
+    """Install path of a compat tool by folder name, or None. A folder only counts
+    when it actually holds a build, so a half-extracted leftover from an
+    interrupted download doesn't read as installed."""
+    for d in compat_dirs(root):
+        p = os.path.join(d, name)
+        if os.path.isdir(os.path.join(p, "files")) or os.path.isdir(os.path.join(p, "dist")):
+            return p
+    return None
 
 
 def newest_proton(root):
@@ -207,13 +238,144 @@ def newest_proton(root):
     return names[0]
 
 
-def ensure_compat_tool(path, appid):
-    """If config.vdf has no CompatToolMapping for appid, point it at the newest
-    installed Proton. Returns True if changed."""
+def _fetch(url, dest=None, label=""):
+    """Download to `dest`, or return the bytes when dest is None. Prints coarse
+    progress so a 400 MB Proton doesn't look like a hang. None on any failure."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Tokeer"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            if dest is None:
+                return r.read()
+            total = int(r.headers.get("Content-Length") or 0)
+            got = 0
+            step = 10
+            with open(dest, "wb") as fh:
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    got += len(chunk)
+                    if total:
+                        pct = got * 100 // total
+                        if pct >= step:
+                            print("    %s %d%% (%d/%d MiB)" % (label, pct, got >> 20, total >> 20))
+                            step = pct - (pct % 10) + 10
+            return True
+    except Exception as e:
+        print("    download failed: %s" % e, file=sys.stderr)
+        return None
+
+
+def _safe_extract(tar_path, into):
+    """Unpack a Proton tarball, refusing any member that would escape `into`.
+    tarfile will happily write ../ paths otherwise."""
+    import tarfile
+    into_abs = os.path.abspath(into)
+    with tarfile.open(tar_path, "r:gz") as tf:
+        for m in tf.getmembers():
+            target = os.path.abspath(os.path.join(into_abs, m.name))
+            if not (target == into_abs or target.startswith(into_abs + os.sep)):
+                raise RuntimeError("refusing unsafe path in tarball: %s" % m.name)
+            if m.issym() or m.islnk():
+                link = os.path.abspath(os.path.join(os.path.dirname(target), m.linkname))
+                if not (link == into_abs or link.startswith(into_abs + os.sep)):
+                    raise RuntimeError("refusing unsafe link in tarball: %s" % m.name)
+        tf.extractall(into)
+
+
+def install_proton(root, name=TARGET_PROTON):
+    """Download and unpack a GE-Proton build into compatibilitytools.d.
+
+    Returns its path, or None if anything went wrong. Callers treat None as "keep
+    whatever Proton the user already has" rather than an error, since a failed
+    download shouldn't block the rest of setup."""
+    dest_dir = compat_dirs(root)[0]
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError as e:
+        print("  could not create %s: %s" % (dest_dir, e), file=sys.stderr)
+        return None
+
+    tmp = os.path.join(dest_dir, "." + name + ".tar.gz")
+    print("  downloading %s (about 400 MB, one time)..." % name)
+    if not _fetch(_GE_URL.format(n=name), tmp, label=name):
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return None
+
+    # GE publishes a sha512sum beside the tarball. Verify whenever we can reach
+    # it: this archive gets executed, so a corrupted or swapped download matters.
+    want = _fetch(_GE_SUM.format(n=name))
+    if want:
+        import hashlib
+        h = hashlib.sha512()
+        with open(tmp, "rb") as fh:
+            for blk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(blk)
+        expect = want.decode("utf-8", "replace").split()[0].strip().lower()
+        if h.hexdigest() != expect:
+            print("  checksum mismatch, discarding the download", file=sys.stderr)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return None
+        print("  checksum ok")
+
+    print("  unpacking...")
+    try:
+        _safe_extract(tmp, dest_dir)
+    except Exception as e:
+        print("  could not unpack %s: %s" % (name, e), file=sys.stderr)
+        return None
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+    got = find_proton(root, name)
+    if got:
+        print("  installed %s" % name)
+    else:
+        print("  %s did not unpack into the expected folder" % name, file=sys.stderr)
+    return got
+
+
+def ensure_proton_installed(root, name=TARGET_PROTON):
+    """Path to `name`, installing it if it isn't there yet. None if unavailable."""
+    have = find_proton(root, name)
+    if have:
+        print("  %s already installed" % name)
+        return have
+    return install_proton(root, name)
+
+
+def _name_value_in(text, open_i, close_i):
+    """The name/value match inside a CompatToolMapping entry, or None."""
+    return re.search(r'("name"\s*")([^"]*)(")', text[open_i:close_i])
+
+
+def ensure_compat_tool(path, appid, want=None):
+    """Point appid at GE-Proton10-34 in config.vdf's CompatToolMapping, switching
+    it even when it is already mapped to a different Proton. True if changed.
+
+    Forcing the switch is deliberate: the Denuvo hook is built against the modern
+    Proton unixlib ABI, and a game left on Proton 7 or an old GE fails in ways
+    that look like a broken activation rather than a wrong Proton."""
     root = os.path.dirname(os.path.dirname(path))  # <root>/config/config.vdf -> <root>
-    proton = newest_proton(root)
+    if want:
+        proton = want
+    else:
+        got = ensure_proton_installed(root)
+        proton = os.path.basename(got) if got else newest_proton(root)
     if not proton:
         return False
+
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         text = fh.read()
 
@@ -223,16 +385,33 @@ def ensure_compat_tool(path, appid):
         # rather than risk corrupting config.vdf by fabricating the whole path.
         return False
     c_open, c_close = ctm
-    if _find_key_block(text, str(appid), c_open + 1, c_close):
-        return False  # already mapped - respect the user's choice
+
+    existing = _find_key_block(text, str(appid), c_open + 1, c_close)
+    if existing:
+        _, e_open, e_close = existing
+        m = _name_value_in(text, e_open, e_close)
+        if not m:
+            return False
+        current = m.group(2)
+        if current == proton:
+            print("  compat tool: app %s already on %s" % (appid, proton))
+            return False
+        lo, hi = e_open + m.start(2), e_open + m.end(2)
+        new = text[:lo] + _vdf_escape(proton) + text[hi:]
+        shutil.copy2(path, path + ".tokeerbak")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(new)
+        print("  compat tool: app %s switched %s -> %s" % (appid, current or "(none)", proton))
+        return True
 
     ind = _indent_at(text, c_open) + "\t"
+    q = '"'
     block = (
-        "\n" + ind + '"' + str(appid) + '"'
+        "\n" + ind + q + str(appid) + q
         + "\n" + ind + "{"
-        + "\n" + ind + "\t" + '"name"\t\t"' + _vdf_escape(proton) + '"'
-        + "\n" + ind + "\t" + '"config"\t\t""'
-        + "\n" + ind + "\t" + '"priority"\t\t"250"'
+        + "\n" + ind + "\t" + q + "name" + q + "\t\t" + q + _vdf_escape(proton) + q
+        + "\n" + ind + "\t" + q + "config" + q + "\t\t" + q + q
+        + "\n" + ind + "\t" + q + "priority" + q + "\t\t" + q + "250" + q
         + "\n" + ind + "}"
     )
     new = text[: c_open + 1] + block + text[c_open + 1:]
@@ -241,7 +420,7 @@ def ensure_compat_tool(path, appid):
     shutil.copy2(path, path + ".tokeerbak")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(new)
-    print(f"  compat tool: mapped app {appid} -> {proton}")
+    print("  compat tool: mapped app %s -> %s" % (appid, proton))
     return True
 
 
@@ -294,6 +473,8 @@ def main():
                 ensure_compat_tool(cfg, appid)
             except Exception as e:
                 print(f"  WARN could not set compat tool in {cfg}: {e}", file=sys.stderr)
+                print(f"  Set it by hand: Steam -> right-click the game -> Properties ->"
+                      f" Compatibility -> {TARGET_PROTON}", file=sys.stderr)
 
     if changed == 0:
         for r in reasons:
