@@ -44,7 +44,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.26"                       # bump on every release
+APP_VERSION = "1.0.27"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -292,13 +292,37 @@ def _appticket_owner_steamid(appticket_hex: str) -> str:
 
 
 def _write_registry(app_id: str, appticket_hex: str, eticket_hex: str) -> None:
-    """Write AppTicket (ownership) + ETicket (encrypted) to Steam's credential store."""
+    """Write AppTicket (ownership) + ETicket (encrypted) + SteamID to Steam's
+    credential store.
+
+    SteamID matters as much as the tickets. The engine spoofs IClientUser::GetSteamID
+    from this value FIRST and only falls back to the id inside AppTicket when it is
+    absent, so a value left over from an earlier redeem outranks the tickets we just
+    wrote. Denuvo then sees a SteamID from one account and an ownership ticket from
+    another, and refuses the launch with 88500012 — on that machine, permanently,
+    no matter which account the pool hands out next, because nothing here ever
+    revisited the stale value.
+
+    Written as REG_SZ decimal digits, which is the only form the engine parses."""
     import winreg
     key_path = f"Software\\Valve\\Steam\\Apps\\{app_id}"
-    key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+    key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0,
+                             winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE)
     try:
         winreg.SetValueEx(key, "AppTicket", 0, winreg.REG_BINARY, bytes.fromhex(appticket_hex))
         winreg.SetValueEx(key, "ETicket", 0, winreg.REG_BINARY, bytes.fromhex(eticket_hex))
+
+        owner = _appticket_owner_steamid(appticket_hex)
+        if owner:
+            winreg.SetValueEx(key, "SteamID", 0, winreg.REG_SZ, owner)
+        else:
+            # Couldn't read an owner out of the ticket. Leaving whatever is there
+            # would let a stale value keep outranking this ticket, so remove it and
+            # let the engine derive the id from the ticket itself.
+            try:
+                winreg.DeleteValue(key, "SteamID")
+            except OSError:
+                pass
     finally:
         winreg.CloseKey(key)
 

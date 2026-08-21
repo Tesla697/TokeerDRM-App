@@ -199,7 +199,25 @@ def find_wine(steam_root: str, override: str | None) -> str:
 # Registry write via `wine reg import`
 # --------------------------------------------------------------------------- #
 def build_reg_file(app_id: str, appticket_hex: str, eticket_hex: str) -> str:
-    """Return a .reg file body (UTF-8) writing both tickets as REG_BINARY."""
+    """Return a .reg file body (UTF-8) writing both tickets as REG_BINARY, plus the
+    owning SteamID as REG_SZ.
+
+    The engine spoofs GetSteamID from the SteamID value FIRST and only reads the id
+    out of AppTicket when that value is missing, so a leftover from an earlier redeem
+    outranks the tickets written here — GetSteamID names one account, the ownership
+    ticket another, and Denuvo refuses with 88500012. A "-" clears the value when the
+    ticket has no readable owner, so the engine falls back to the ticket instead of
+    keeping the stale id."""
+    def owner_of(h: str) -> str:
+        try:
+            data = bytes.fromhex((h or "").strip())
+            if len(data) < 16:
+                return ""
+            sid = int.from_bytes(data[8:16], "little")
+            return str(sid) if sid >= 76561197960265728 else ""
+        except Exception:
+            return ""
+
     def as_hex(h: str) -> str:
         h = h.strip().replace(" ", "").replace("\n", "")
         pairs = [h[i:i + 2].lower() for i in range(0, len(h), 2)]
@@ -215,11 +233,14 @@ def build_reg_file(app_id: str, appticket_hex: str, eticket_hex: str) -> str:
         return ",\\\n  ".join(out)
 
     key = f"HKEY_CURRENT_USER\\Software\\Valve\\Steam\\Apps\\{app_id}"
+    owner = owner_of(appticket_hex)
+    steam_id_line = f'"SteamID"="{owner}"\n' if owner else '"SteamID"=-\n'
     return (
         "Windows Registry Editor Version 5.00\n\n"
         f"[{key}]\n"
         f'"AppTicket"=hex:{as_hex(appticket_hex)}\n'
         f'"ETicket"=hex:{as_hex(eticket_hex)}\n'
+        f"{steam_id_line}"
     )
 
 
