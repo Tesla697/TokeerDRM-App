@@ -3,12 +3,16 @@
 Auto-configure Steam for a Tokeer Linux/Proton game - no manual Steam UI.
 
 Given an appid + the launch-option string, this:
-  1. sets the game's **Launch Options** in every user's localconfig.vdf, and
+  1. sets the game's **Launch Options** in every user's localconfig.vdf,
   2. forces the game onto GE-Proton10-34 via config.vdf's CompatToolMapping,
      downloading it into compatibilitytools.d first if it isn't installed. It
      switches even when the game is already mapped to another Proton, because
      the Denuvo hook needs the modern Proton ABI and an old build fails in ways
-     that look like a broken activation.
+     that look like a broken activation, and
+  3. points Steam's **Default compatibility tool** (appid 0 in the same mapping)
+     at that same Proton. If the default disagrees with the per-game override,
+     Steam falls back to the default on the next launch / after a reboot and the
+     activation looks like it vanished.
 
 Pure stdlib so it runs on the Steam Deck's system python. Steam MUST be closed
 while this runs (it rewrites these files on exit and would clobber our edits) -
@@ -469,12 +473,23 @@ def main():
     for root in roots:
         cfg = os.path.join(root, "config", "config.vdf")
         if os.path.isfile(cfg):
+            # Resolve the Proton once so the per-game override AND the global
+            # default land on the SAME build. Steam stores the "Default
+            # compatibility tool" (Steam Play for all other titles) as appid 0
+            # in the very same CompatToolMapping. If that default disagrees with
+            # the per-game override, Steam quietly falls back to it on the next
+            # launch and after a reboot, dropping the game onto the wrong Proton
+            # so the activation looks like it vanished. Set both to match.
+            got = ensure_proton_installed(root)
+            proton = os.path.basename(got) if got else newest_proton(root)
             try:
-                ensure_compat_tool(cfg, appid)
+                ensure_compat_tool(cfg, appid, want=proton)
+                ensure_compat_tool(cfg, "0", want=proton)
             except Exception as e:
                 print(f"  WARN could not set compat tool in {cfg}: {e}", file=sys.stderr)
-                print(f"  Set it by hand: Steam -> right-click the game -> Properties ->"
-                      f" Compatibility -> {TARGET_PROTON}", file=sys.stderr)
+                print(f"  Set it by hand: Steam -> Settings -> Compatibility ->"
+                      f" Default compatibility tool -> {TARGET_PROTON}, and the same"
+                      f" under the game's Properties -> Compatibility.", file=sys.stderr)
 
     if changed == 0:
         for r in reasons:
