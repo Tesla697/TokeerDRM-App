@@ -209,9 +209,10 @@ function initRedeem() {
       if (!(await maybeOfferCloud(out))) { loading(btn, false); return; }
       const r = await call("redeem", code);
       if (r.ok) {
-        setResult(out, "ok", `Ticket applied for app ${r.app_id}. Launch the game from Steam within 30 min.`);
-        toast("Ticket applied — launch within 30 min", "ok");
+        setResult(out, "ok", `Ticket applied for app ${r.app_id}. Auto-launching the game…`);
+        toast("Applied, launching game", "ok");
         clearCode();
+        try { await call("run_game", r.app_id); } catch {}
       } else {
         setResult(out, "err", r.error || "Something went wrong.");
         toast(r.error || "Redeem failed", "err");
@@ -516,6 +517,105 @@ async function checkUpdate() {
   } catch { /* offline → don't block */ }
 }
 
+// ── one-click auto-redeem (from the tokeerdrm:// deep link) ─────────────────────
+// Python calls window.__ostIncomingCode(code) when the app is opened (or focused)
+// via the Discord "Redeem in App" button. We fill the code, apply it, auto-run any
+// required engine/DLL/cloud fix, retry the SAME code (it's single-use but never
+// burned on a gated failure), and launch the game once the ticket actually applies.
+window.__redeemReady = false;
+window.__pendingCode = null;
+window.__ostIncomingCode = function (code) {
+  const clean = (code || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+  if (clean.length !== 6) return;
+  if (window.__redeemReady) startAutoRedeem(clean);
+  else window.__pendingCode = clean;   // arrived before the UI finished booting
+};
+
+function fillCodeBoxes(code) {
+  const boxes = $$(".cbox", $("#codeBoxes"));
+  const clean = (code || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+  boxes.forEach((b, i) => {
+    b.value = clean[i] || "";
+    b.classList.toggle("filled", !!b.value);
+  });
+  return clean;
+}
+
+function gotoActivateTab() {
+  const tab = $('.tab[data-tab="activate"]');
+  if (tab) tab.click();
+}
+
+// Poll until OpenSteamTool is ready AND the enhanced DLL is current, or time out.
+// Used after an auto-install / DLL fix (which restarts Steam) before we retry.
+async function waitForEngineReady(timeoutMs = 120000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const s = await call("engine_status");
+      const ds = await call("dll_status");
+      if (s && s.ready && !(ds && (ds.needs_fix || ds.needs_update))) return true;
+    } catch {}
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  return false;
+}
+
+let __autoRedeemRunning = false;
+async function startAutoRedeem(code) {
+  if (__autoRedeemRunning) return;
+  __autoRedeemRunning = true;
+  const out = $("#redeemResult");
+  try {
+    gotoActivateTab();
+    const clean = fillCodeBoxes(code);
+    if (clean.length !== 6) { toast("That link had a bad code.", "err"); return; }
+    toast("Code received — applying…", "ok");
+
+    // Up to 4 passes; each may auto-run one fix (engine/DLL/cloud) then retry.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      setResult(out, "", "Applying your code…");
+      let r;
+      try { r = await call("redeem", clean); }
+      catch (e) { setResult(out, "err", String(e)); break; }
+
+      if (r && r.ok) {
+        setResult(out, "ok", `Ticket applied for app ${r.app_id}. Launching the game…`);
+        toast("Applied — launching game", "ok");
+        clearCode();
+        try { await call("run_game", r.app_id); } catch {}
+        break;
+      }
+
+      // Auto-fix branches — run the fix, wait for Steam/engine to settle, then retry.
+      if (r && r.engine_fix) {
+        showEngineBanner(r.error || "Setting up OpenSteamTool — approve the Windows prompt…");
+        await runEngineAction("install_engine", $("#engineBtn") || $("#ostInstallBtn"), "OpenSteamTool ready");
+        await waitForEngineReady();
+        continue;
+      }
+      if (r && r.dll_fix) {
+        showDllBanner(r.error || "Installing the enhanced DLL — Steam will restart…");
+        const b = $("#dllFixBtn"); if (b) b.click();
+        await new Promise((res) => setTimeout(res, 4000));  // let the swap + Steam restart begin
+        await waitForEngineReady();
+        continue;
+      }
+      if (r && r.cloud_fix) {
+        await maybeOfferCloud(out);   // prompt + enable cloud saves, then retry
+        continue;
+      }
+
+      // Any other error → surface it and stop (code stays valid to retry manually).
+      setResult(out, "err", (r && r.error) || "Redeem failed.");
+      toast((r && r.error) || "Redeem failed", "err");
+      break;
+    }
+  } finally {
+    __autoRedeemRunning = false;
+  }
+}
+
 // ── boot ────────────────────────────────────────────────────────────────────────
 whenReady(() => {
   API = window.pywebview.api;
@@ -530,6 +630,9 @@ whenReady(() => {
   checkUpdate();            // force-update gate
   refreshStatus();
   refreshEngine().then(checkDllStatus);
+  // The UI is ready — run any code that arrived via deep link before boot finished.
+  window.__redeemReady = true;
+  if (window.__pendingCode) { const c = window.__pendingCode; window.__pendingCode = null; startAutoRedeem(c); }
   setInterval(refreshStatus, 15000);
   // Live re-check: a user can swap in a different/old OpenSteamTool.dll or remove the
   // hijack proxies AFTER the app is open. Poll engine + DLL state so the banners and

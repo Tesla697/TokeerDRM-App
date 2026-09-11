@@ -2,8 +2,8 @@
 from PyInstaller.utils.hooks import collect_all
 from PyInstaller.utils.hooks import copy_metadata
 
-datas = [('web', 'web'), ('app_icon.ico', '.')]
-binaries = [('extract_tickets.exe', '.'), ('cloud_redirect.dll', '.')]
+datas = [('web', 'web'), ('app_icon.ico', '.'), ('savetools/profiles', 'savetools/profiles')]
+binaries = [('extract_tickets.exe', '.'), ('cloud_redirect.dll', '.'), ('savetools/mandarin-juice-cli.exe', 'savetools')]
 hiddenimports = ['appdirs']
 datas += copy_metadata('appdirs')
 tmp_ret = collect_all('webview')

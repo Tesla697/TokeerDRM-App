@@ -43,6 +43,9 @@ CUSTOM_OST_API    = f"https://api.github.com/repos/{CUSTOM_OST_REPO}/releases/la
 # bare .dll asset, so there is no /releases/latest/download/OpenSteamTool.dll to fall
 # back to. The asset name is remembered per tag instead (see _gh_meta).
 OST_PROXY_RELEASE = "https://luastools.xyz/ost/latest"
+# Same worker, one asset. Kept separately so a download can be retried through the
+# mirror even when the release JSON came from api.github.com, and the other way round.
+OST_PROXY_ASSET   = "https://luastools.xyz/ost/asset"
 # On-demand eticket mint endpoint (Cloudflare-fronted; origin IP hidden, rate
 # limited). Written into a lua so the BetterSteamTools DLL enables minting.
 ETICKET_URL       = "https://luastools.xyz/eticket"
@@ -1525,8 +1528,9 @@ def custom_dll_needs_update(sp=None):
 
 
 def _download_bytes(url, progress=_noop, lo=15, hi=60, timeout=120):
-    """Fetch a URL with progress between lo% and hi%. Returns b"" on any failure so
-    the caller can try the next source instead of aborting the install."""
+    """Fetch a URL with progress between lo% and hi%. Returns (bytes, error): the
+    error text is kept so a failed install can say WHY instead of just "couldn't
+    download", which tells nobody anything when it's antivirus or an ISP block."""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "TokeerDRM"})
         resp = urllib.request.urlopen(req, timeout=timeout)
@@ -1541,16 +1545,84 @@ def _download_bytes(url, progress=_noop, lo=15, hi=60, timeout=120):
             got += len(chunk)
             if total:
                 progress(lo + int(got * (hi - lo) / total), "Downloading…")
-        return buf.getvalue()
-    except Exception:
-        return b""
+        raw = buf.getvalue()
+        if total and len(raw) < total:
+            return b"", f"connection closed after {len(raw)} of {total} bytes"
+        if not raw:
+            return b"", "server returned an empty file"
+        return raw, ""
+    except Exception as e:
+        return b"", f"{type(e).__name__}: {e}"
+
+
+def _download_failed_message(err):
+    """One message that actually helps. Every source is on Cloudflare, so a failure
+    here is almost always local: antivirus killing the connection, an ISP block, or a
+    TLS-inspecting proxy the bundled cert store doesn't know."""
+    base = "Couldn't download the enhanced DLL."
+    low = (err or "").lower()
+    if "certificate" in low or "ssl" in low:
+        tail = ("Your antivirus or network is intercepting HTTPS. Turn off its HTTPS "
+                "scanning, or try a different network.")
+    elif "403" in low or "404" in low or "502" in low:
+        tail = "The release server refused the request. Try again in a few minutes."
+    elif ("closed" in low or "timed out" in low or "timeout" in low
+          or "reset" in low or "incomplete" in low):
+        tail = ("The download kept getting cut off. Antivirus scanning or an unstable "
+                "connection usually does this - pause real-time protection, or try a VPN.")
+    elif "name or service" in low or "getaddrinfo" in low or "urlerror" in low:
+        tail = ("luastools.xyz and github.com couldn't be reached. Check your DNS or "
+                "try a VPN.")
+    else:
+        tail = "Antivirus or your network may be blocking it. Try a VPN, then retry."
+    return f"{base} {tail}" + (f" ({err})" if err else "")
+
+
+def _dll_download_urls(url, tag, name):
+    """Every place the same asset can be fetched from, best first. The mirror and
+    github.com serve identical bytes, so whichever one a user's network or AV is
+    breaking on, the other still finishes the install."""
+    urls = [u for u in (url,) if u]
+    if tag and name:
+        direct = (f"https://github.com/{CUSTOM_OST_REPO}/releases/download/"
+                  f"{urllib.parse.quote(tag)}/{urllib.parse.quote(name)}")
+        mirror = (f"{OST_PROXY_ASSET}?tag={urllib.parse.quote(tag)}"
+                  f"&name={urllib.parse.quote(name)}")
+        for u in (mirror, direct):
+            if u not in urls:
+                urls.append(u)
+    return urls
+
+
+def _asset_digest(asset):
+    """sha256 hex from an asset's `digest` field, "" when the release has none."""
+    dg = ((asset or {}).get("digest") or "").strip().lower()
+    return dg.split(":", 1)[1] if dg.startswith("sha256:") else ""
+
+
+def _download_dll_asset(url, tag, name, progress=_noop, digest=""):
+    """Walk the sources until one hands over the file intact. A download that arrives
+    truncated or rewritten (AV in the middle) fails the digest and we move on to the
+    next source instead of installing a broken DLL. Returns (bytes, error)."""
+    urls = _dll_download_urls(url, tag, name)
+    err = "no download URL"
+    for i, u in enumerate(urls):
+        if i:
+            progress(15, "Retrying from a different source…")
+        raw, err = _download_bytes(u, progress, lo=15, hi=60)
+        if raw and digest and _sha256_bytes(raw) != digest:
+            err = "the file arrived corrupted (checksum mismatch)"
+            continue
+        if raw:
+            return raw, ""
+    return b"", err
 
 
 def _write_custom_dll(sp, raw, tag, progress=_noop, restart_steam=True):
     """Shut Steam down, drop the DLL + marker in place, and bring Steam back.
     Shared by every source we can get the DLL from (worker mirror or GitHub)."""
     if not raw:
-        return {"ok": False, "message": "Couldn't download custom DLL."}
+        return {"ok": False, "message": _download_failed_message("")}
 
     progress(62, "Closing Steam…")
     _shutdown_steam(sp, progress, lo=62, hi=74)
@@ -1599,6 +1671,8 @@ def install_custom_dll(progress=_noop, restart_steam=True):
 
     tag = ""
     url = ""
+    name = ""
+    digest = ""
     is_zip = False
     if data is not None:
         tag = data.get("tag_name", "") or ""
@@ -1606,6 +1680,8 @@ def install_custom_dll(progress=_noop, restart_steam=True):
         if not asset:
             return {"ok": False, "message": "Custom DLL not found in the release assets."}
         url = asset.get("browser_download_url") or ""
+        name = asset.get("name") or ""
+        digest = _asset_digest(asset)
     else:
         # Both sources are unreachable (usually a rate limit with nothing cached yet).
         # We can still install if a previous run recorded which asset to fetch, since
@@ -1620,9 +1696,9 @@ def install_custom_dll(progress=_noop, restart_steam=True):
         progress(12, "Using the last known release link…")
 
     progress(15, "Downloading custom OpenSteamTool.dll…")
-    raw = _download_bytes(url, progress, lo=15, hi=60)
+    raw, err = _download_dll_asset(url, tag, name, progress, digest)
     if not raw:
-        return {"ok": False, "message": "Couldn't download custom DLL."}
+        return {"ok": False, "message": _download_failed_message(err)}
 
     if is_zip:
         raw = _dll_from_zip(raw)

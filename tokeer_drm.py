@@ -21,6 +21,7 @@ import traceback
 import requests
 
 import ost_setup
+import save_watchdog
 
 try:
     import webview
@@ -44,7 +45,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.27"                       # bump on every release
+APP_VERSION = "1.0.28"                       # bump on every release
 UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -236,6 +237,10 @@ def _run_extract(app_id: str) -> dict | None:
 
 
 _STEAMID64_BASE = 76561197960265728  # 0x0110000100000000 — individual/public base
+
+# appid -> SteamID64 of the account the last redeem activated it with. The save
+# watchdog needs this to know which userdata folder the game will run under.
+_LAST_ACTIVATION: dict = {}
 
 
 def _current_steam_id() -> str:
@@ -896,6 +901,18 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": f"Registry write failed: {e}"}
 
+        # Remember which account this activation runs under, so the save watchdog
+        # knows the userdata folder the game will land in when it launches.
+        owner = _appticket_owner_steamid(appticket)
+        if owner:
+            _LAST_ACTIVATION[app_id] = owner
+
+        # Arm the save carry-over now, whether the user launches from the one-click
+        # flow (run_game) or manually from Steam. It waits for the new activation
+        # folder to appear, then re-signs the previous save onto it.
+        if owner and save_watchdog.is_supported(app_id):
+            save_watchdog.start(app_id, owner, log=lambda m: _push_progress(50, m))
+
         return {
             "ok": True,
             "app_id": app_id,
@@ -907,6 +924,16 @@ class Api:
         app_id = "".join(c for c in str(app_id) if c.isdigit())
         if not app_id:
             return {"ok": False, "error": "No app id to launch."}
+        # Capcom RE Engine games sign saves to the activation account and land them
+        # in that account's userdata folder, so a new activation starts fresh. The
+        # watchdog launches the game itself and carries the previous save over, so
+        # hand off to it instead of launching here (guarded against double-arming).
+        if save_watchdog.is_supported(app_id):
+            new_id = _LAST_ACTIVATION.get(app_id) or _current_steam_id()
+            save_watchdog.start(app_id, new_id,
+                                log=lambda m: _push_progress(50, m))
+            return {"ok": True, "app_id": app_id}
+
         try:
             url = f"steam://rungameid/{app_id}"
             if sys.platform == "win32":
@@ -914,9 +941,10 @@ class Api:
             else:
                 import webbrowser
                 webbrowser.open(url)
-            return {"ok": True, "app_id": app_id}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+        return {"ok": True, "app_id": app_id}
 
 
 # ---------------------------------------------------------------------------
