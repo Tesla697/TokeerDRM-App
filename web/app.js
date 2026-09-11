@@ -490,6 +490,48 @@ function setUpdateProgress(p, m) {
   if (m) { const t = $("#ugText"); if (t) t.textContent = m; }
 }
 
+// ── patch notes: what's-new shown once after the app updates ────────────────────
+// One entry per released version. When APP_VERSION goes up, the app shows the
+// matching notes once, then remembers the version so it never nags again. Add a
+// new entry here every release.
+const PATCH_NOTES = {
+  "1.0.28": [
+    "Your existing save now carries over automatically when you activate on a new account, for Resident Evil Requiem, PRAGMATA, Monster Hunter Stories 3 and Onimusha. The first launch may briefly open and close the game and show a command prompt while the save transfers, then it opens on its own.",
+    "After you paste a code, the app now launches the game for you instead of asking you to open it from Steam.",
+    "Linux: games run on GE-Proton10-34 (installed automatically if missing), and the per-game Proton tool now survives a reboot.",
+    "SteamID is written with the tickets on redeem, and update checks are faster.",
+  ],
+};
+const PATCH_NOTES_SEEN_KEY = "tokeerdrm_seen_version";
+
+function maybeShowPatchNotes(current) {
+  if (!current) return;
+  let seen = null;
+  try { seen = localStorage.getItem(PATCH_NOTES_SEEN_KEY); } catch {}
+  // Brand-new install (nothing seen yet): remember the version, don't greet a
+  // first-time user with a changelog for a version they never ran before.
+  if (!seen) { try { localStorage.setItem(PATCH_NOTES_SEEN_KEY, current); } catch {} return; }
+  if (seen === current) return;                 // already showed this version
+  const notes = PATCH_NOTES[current];
+  try { localStorage.setItem(PATCH_NOTES_SEEN_KEY, current); } catch {}
+  if (!notes || !notes.length) return;          // no notes for this version
+  showPatchNotes(current, notes);
+}
+
+function showPatchNotes(version, notes) {
+  const gate = $("#patchNotesGate");
+  if (!gate) return;
+  const titleEl = $("#pnTitle"), listEl = $("#pnList");
+  if (titleEl) titleEl.textContent = `What's new in v${version}`;
+  if (listEl) {
+    listEl.innerHTML = "";
+    for (const n of notes) { const li = document.createElement("li"); li.textContent = n; listEl.appendChild(li); }
+  }
+  const btn = $("#pnCloseBtn");
+  if (btn) btn.onclick = () => { gate.hidden = true; };
+  gate.hidden = false;
+}
+
 async function checkUpdate() {
   try {
     const v = await call("version_info");
@@ -513,6 +555,9 @@ async function checkUpdate() {
       // Fallback: open the GitHub release to download manually.
       $("#ugBtn").onclick = () => call("open_url", v.url);
       $("#updateGate").hidden = false;   // blocks the whole UI
+    } else {
+      // On the latest version: show this version's patch notes once after an update.
+      maybeShowPatchNotes(v && v.current);
     }
   } catch { /* offline → don't block */ }
 }
