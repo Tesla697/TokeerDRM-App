@@ -116,11 +116,24 @@ def _logged_in_account32(steam_root: str) -> str:
         text = open(os.path.join(steam_root, "config", "loginusers.vdf"),
                     encoding="utf-8", errors="replace").read()
         best = None
-        for m in re.finditer(r'"(\d{17})"\s*\{([^}]*)\}', text):
+        for m in re.finditer(r'"(\d{17})"\s*\{(.*?)\}', text, re.DOTALL):
             if re.search(r'"MostRecent"\s*"1"', m.group(2)):
+                best = m.group(1)
+        if not best:
+            m = re.search(r'"(\d{17})"', text)
+            if m:
                 best = m.group(1)
         if best:
             return str(int(best) - STEAMID64_BASE)
+    except OSError:
+        pass
+    # Last resort: exactly one real userdata account is the signed-in one.
+    try:
+        ud = os.path.join(steam_root, "userdata")
+        accts = [n for n in os.listdir(ud)
+                 if n.isdigit() and n != "0" and os.path.isdir(os.path.join(ud, n))]
+        if len(accts) == 1:
+            return accts[0]
     except OSError:
         pass
     return ""
@@ -164,6 +177,33 @@ def _save_data_folder(remote: str):
     if rel == ".":
         rel = ""
     return best, best_bytes, rel
+
+
+def _acti_folders(steam_root: str, app_id: str) -> list:
+    """Every userdata/<id>/<appid>/remote that exists, as (id, remote)."""
+    out = []
+    userdata = os.path.join(steam_root, "userdata")
+    try:
+        for name in os.listdir(userdata):
+            if not name.isdigit() or name == "0":
+                continue
+            remote = os.path.join(userdata, name, app_id, "remote")
+            if os.path.isdir(remote):
+                out.append((name, remote))
+    except OSError:
+        pass
+    return out
+
+
+def _biggest_save(steam_root: str, app_id: str):
+    """The biggest save-data folder across every userdata folder for this game.
+    That is the real progress. Returns (data, bytes, rel, remote) or None."""
+    best = None
+    for _id, remote in _acti_folders(steam_root, app_id):
+        df = _save_data_folder(remote)
+        if df and (best is None or df[1] > best[1]):
+            best = (df[0], df[1], df[2], remote)
+    return best
 
 
 def _appid_folders(steam_root: str, app_id: str) -> set:
@@ -385,15 +425,23 @@ def carry_over(app_id: str, new_owner_steamid: str, steam_root: str = "",
     install_dir = install_dir or _install_dir(steam_root, app_id)
     profile_name = SUPPORTED[app_id]
 
+    # Prefer the signed-in account's folder (where the game reads and writes). If it
+    # can't be read, fall back to the userdata folder that actually holds the biggest
+    # save for this game, so a Deck that doesn't expose the active user still works.
     active = _logged_in_account32(steam_root)
-    if not active:
-        _log(log, "Could not read the signed-in account; leaving saves alone.")
-        return False
-    target_remote = os.path.join(steam_root, "userdata", active, app_id, "remote")
+    target_remote = ""
+    if active:
+        cand = os.path.join(steam_root, "userdata", active, app_id, "remote")
+        if os.path.isdir(cand):
+            target_remote = cand
+    if not target_remote:
+        best = _biggest_save(steam_root, app_id)
+        if best:
+            target_remote = best[3]
 
-    df = _save_data_folder(target_remote)
+    df = _save_data_folder(target_remote) if target_remote else None
     if not df:
-        _log(log, "No save in your account folder to carry; opening the game.")
+        _log(log, "No save found for this game to carry; opening the game.")
         _launch(app_id)
         return True
     old_data, _b, rel = df
