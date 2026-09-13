@@ -40,8 +40,6 @@ SUPPORTED = {
 }
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_KILL_GRACE_SECONDS = 5
-_FOLDER_CAP_SECONDS = 120
 
 
 def is_supported(app_id: str) -> bool:
@@ -206,26 +204,29 @@ def _biggest_save(steam_root: str, app_id: str):
     return best
 
 
-def _appid_folders(steam_root: str, app_id: str) -> set:
-    ud = os.path.join(steam_root, "userdata")
-    out = set()
-    try:
-        for name in os.listdir(ud):
-            if os.path.isdir(os.path.join(ud, name, app_id)):
-                out.add(name)
-    except OSError:
-        pass
-    return out
-
-
 # --------------------------------------------------------------------------- #
 # Game process control (Proton-aware)
 # --------------------------------------------------------------------------- #
-def _game_procs(install_dir: str) -> list:
-    """PIDs whose command line references the game's install dir. Under Proton the
-    game exe runs via wine, so /proc/<pid>/exe points at the wine loader; the game
-    path shows up in the command line instead, which is what we match on."""
-    if not install_dir:
+def _game_procs(install_dir: str, app_id: str = "") -> list:
+    """PIDs of the running game. Under Proton the game exe runs via wine, so
+    /proc/<pid>/exe points at the wine loader; the game path shows up in the command
+    line instead. We match several ways because the install dir can be reached
+    through a symlink (~/.steam/steam vs ~/.local/share/Steam) so the raw path may
+    not match: the folder name, the resolved realpath, and Steam's `AppId=<id>`
+    reaper argument. None of these appear in our own command line."""
+    needles = []
+    if install_dir:
+        d = install_dir.rstrip("/")
+        needles.append(d)
+        rp = os.path.realpath(d)
+        if rp != d:
+            needles.append(rp)
+        base = os.path.basename(d)
+        if base:
+            needles.append(base)
+    if app_id:
+        needles.append("AppId=%s" % app_id)
+    if not needles:
         return []
     out = []
     for pid in os.listdir("/proc"):
@@ -236,19 +237,19 @@ def _game_procs(install_dir: str) -> list:
                 cmd = fh.read().replace(b"\x00", b" ").decode("utf-8", "replace")
         except OSError:
             continue
-        if install_dir in cmd:
+        if any(n in cmd for n in needles):
             out.append(int(pid))
     return out
 
 
-def _kill_game(install_dir: str) -> None:
-    for pid in _game_procs(install_dir):
+def _kill_game(install_dir: str, app_id: str = "") -> None:
+    for pid in _game_procs(install_dir, app_id):
         try:
             os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
     time.sleep(2)
-    for pid in _game_procs(install_dir):
+    for pid in _game_procs(install_dir, app_id):
         try:
             os.kill(pid, signal.SIGKILL)
         except OSError:
@@ -265,30 +266,6 @@ def _launch(app_id: str) -> None:
                          stderr=subprocess.DEVNULL)
     except OSError:
         pass
-
-
-def _wait_until_running(install_dir: str, deadline: float, log) -> bool:
-    if not install_dir:
-        _log(log, "Could not locate the game to watch; leaving saves alone.")
-        return False
-    _log(log, "Waiting for the game to start...")
-    while time.time() < deadline:
-        if _game_procs(install_dir):
-            return True
-        time.sleep(1)
-    return False
-
-
-def _settle_and_kill(steam_root, app_id, install_dir, target, base_folders, log) -> None:
-    deadline = time.time() + _FOLDER_CAP_SECONDS
-    while time.time() < deadline:
-        if not _game_procs(install_dir):
-            break
-        if os.path.isdir(target) or (_appid_folders(steam_root, app_id) - base_folders):
-            break
-        time.sleep(1)
-    time.sleep(_KILL_GRACE_SECONDS)
-    _kill_game(install_dir)
 
 
 # --------------------------------------------------------------------------- #
@@ -447,6 +424,10 @@ def carry_over(app_id: str, new_owner_steamid: str, steam_root: str = "",
     old_data, _b, rel = df
     target = os.path.join(target_remote, rel) if rel else target_remote
 
+    # The save folder already exists, so there is nothing to have the game create.
+    # Snapshot it now (before anything can touch it), make sure no game instance is
+    # holding the files, then re-sign in place. This avoids launching and racing the
+    # game just to settle a folder that is already there.
     work = os.path.join("/tmp", "ltsave_%s_%d" % (app_id, int(time.time())))
 
     def _skip_cache(dirpath, names):
@@ -458,16 +439,10 @@ def carry_over(app_id: str, new_owner_steamid: str, steam_root: str = "",
         _log(log, "Could not stage the save (%s); skipping." % e)
         return False
 
-    base_folders = _appid_folders(steam_root, app_id)
-    _log(log, "Launching the game...")
-    _launch(app_id)
-    if not _wait_until_running(install_dir, time.time() + 1800, log):
-        _log(log, "Game did not start; leaving saves alone.")
-        shutil.rmtree(work, ignore_errors=True)
-        return True
-    _log(log, "Closing the game to swap your save in...")
-    _settle_and_kill(steam_root, app_id, install_dir, target, base_folders, log)
-    time.sleep(3)
+    if _game_procs(install_dir, app_id):
+        _log(log, "Closing the game to swap your save in...")
+        _kill_game(install_dir, app_id)
+        time.sleep(3)
 
     try:
         cli, profiles = _tools()
