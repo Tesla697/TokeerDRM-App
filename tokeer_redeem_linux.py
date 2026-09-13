@@ -392,7 +392,90 @@ def place_reframework_dll(install_dir: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Standalone save re-sign (no code needed)
+# --------------------------------------------------------------------------- #
+def read_prefix_owner(prefix: str, app_id: str) -> str:
+    """The owning SteamID of the ticket already applied to this Proton prefix, read
+    from user.reg (the redeemer wrote it there at activation). Prefers the SteamID
+    value; falls back to the owner encoded in the AppTicket. "" if none found."""
+    import re
+    reg = os.path.join(prefix, "user.reg")
+    try:
+        text = open(reg, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return ""
+    # Grab just this app's key block (up to the next section header).
+    key = r"[Software\\Valve\\Steam\\Apps\\%s]" % app_id
+    start = text.find(key)
+    if start == -1:
+        return ""
+    end = text.find("\n[", start + len(key))
+    block = text[start:] if end == -1 else text[start:end]
+
+    m = re.search(r'"SteamID"="(\d+)"', block)
+    if m and int(m.group(1)) >= 76561197960265728:
+        return m.group(1)
+    # AppTicket=hex:xx,xx,\   with 2-space continuation lines.
+    m = re.search(r'"AppTicket"=hex:([0-9a-fA-F,\\\s]+)', block)
+    if m:
+        hx = re.sub(r'[^0-9a-fA-F]', '', m.group(1))
+        owner = ticket_owner_steamid(hx)
+        if owner:
+            return owner
+    return ""
+
+
+def resign_main(argv) -> None:
+    """`tokeer resign [APPID]` - re-sign the existing save onto the account the
+    game is currently activated with, without spending a code. Only the RE Engine
+    titles that sign saves per-account are supported."""
+    try:
+        import tokeer_save_carry
+    except Exception as e:
+        die(f"save tools are missing from this install ({e}); re-run install_linux.sh")
+
+    steam_root = find_steam_root(None)
+
+    app_id = (argv[0].strip() if argv and argv[0].strip().isdigit() else "")
+    if not app_id:
+        # No appid given: pick the supported game that has a save on disk.
+        active = None
+        try:
+            for name in os.listdir(os.path.join(steam_root, "userdata")):
+                for a in tokeer_save_carry.SUPPORTED:
+                    if os.path.isdir(os.path.join(steam_root, "userdata", name, a, "remote")):
+                        active = a
+        except OSError:
+            pass
+        if not active:
+            names = ", ".join(sorted(tokeer_save_carry.SUPPORTED))
+            die(f"no supported save found. Pass the app id: tokeer resign <APPID>  (one of: {names})")
+        app_id = active
+        log(f"resigning the save for app {app_id} (auto-detected)")
+
+    if not tokeer_save_carry.is_supported(app_id):
+        die(f"save re-signing isn't available for app {app_id} (no per-account save profile)")
+
+    prefix = find_prefix(steam_root, app_id)
+    owner = read_prefix_owner(prefix, app_id)
+    if not owner:
+        die("this game isn't activated yet on this account. Run `tokeer <CODE>` first, "
+            "then use `tokeer resign` only if the save still won't load.")
+
+    install_dir = find_install_dir(steam_root, app_id)
+    log(f"re-signing your save onto the current activation ({owner}) ...")
+    tokeer_save_carry.carry_over(app_id, owner, steam_root=steam_root,
+                                 install_dir=install_dir, log=log)
+    log("Done.")
+
+
+# --------------------------------------------------------------------------- #
 def main() -> None:
+    if len(sys.argv) >= 2 and sys.argv[1] == "resign":
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        resign_main(sys.argv[2:])
+        return
+
     ap = argparse.ArgumentParser(description="Tokeer DRM redeemer (Linux/Proton).")
     ap.add_argument("code", help="6-character redeem code")
     ap.add_argument("--appid", help="override app id (else taken from server response)")

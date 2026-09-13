@@ -16,6 +16,7 @@ if [ $# -lt 1 ]; then
     echo "       tokeer verify-ubi <APPID>   # Ubisoft: check the game files for the Proton flow"
     echo "       tokeer <CODE>               # activate + launch"
     echo "       tokeer <CODE> --no-launch   # write the ticket only"
+    echo "       tokeer resign [APPID]       # re-sign the save if it won't load (no code needed)"
     exit 1
 fi
 
