@@ -463,6 +463,10 @@ def resign_main(argv) -> None:
             "then use `tokeer resign` only if the save still won't load.")
 
     install_dir = find_install_dir(steam_root, app_id)
+    # Make sure the game folder is fully fixed, not just the save: ensure the
+    # REFramework dinput8.dll is in place too (no-op if it already is).
+    if app_id in REFRAMEWORK_DINPUT8_GAMES:
+        place_reframework_dll(install_dir)
     log(f"re-signing your save onto the current activation ({owner}) ...")
     tokeer_save_carry.carry_over(app_id, owner, steam_root=steam_root,
                                  install_dir=install_dir, log=log)
