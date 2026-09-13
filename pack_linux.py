@@ -38,6 +38,14 @@ FILES = [
     ("tokeer_redeem_linux.py", False),
     ("linux/tokeer_steam_config.py", False),
     ("linux/tokeer_validate_linux.py", False),
+    # Capcom RE Engine save carry-over: the module, the official linux CLI, and the
+    # per-game profiles. All land flat next to the module after install.
+    ("linux/tokeer_save_carry.py", False),
+    ("linux/savetools/mandarin-juice-cli", True),
+    ("linux/savetools/profiles/Resident Evil 9 Requiem v1.bin", False),
+    ("linux/savetools/profiles/PRAGMATA v1.bin", False),
+    ("linux/savetools/profiles/Monster Hunter Stories 3 Twisted Reflection v1.bin", False),
+    ("linux/savetools/profiles/Onimusha Way of the Sword v1.bin", False),
 ]
 
 # The prebuilt native hook. Optional: without it the installer compiles on the

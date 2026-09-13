@@ -43,6 +43,10 @@ if [ "$have_local" = 1 ]; then
     echo "[1/6] using bundle from current directory"
     cp -f "${need[@]}" "$TDIR"/
     [ -f ./ost_native_hook.so ] && cp -f ./ost_native_hook.so "$TDIR"/ || true
+    # Optional save-carry tools (RE Engine save re-sign). Absent = feature off.
+    cp -f ./tokeer_save_carry.py "$TDIR"/ 2>/dev/null || true
+    cp -f ./mandarin-juice-cli "$TDIR"/ 2>/dev/null || true
+    for pf in ./*.bin; do [ -f "$pf" ] && cp -f "$pf" "$TDIR"/; done
 else
     echo "[1/6] downloading bundle -> $BUNDLE_URL"
     tmp="$(mktemp -d)"
@@ -60,6 +64,7 @@ printf 'SERVER_URL = "%s"\n' "$SERVER" > "$TDIR/server_config.py"
 # 3) Native hook: use the prebuilt .so if shipped, else compile it.
 #    Ubisoft mode skips this entirely (the folder-based flow doesn't use it).
 chmod +x "$TDIR/build.sh" "$TDIR/ost-run.sh" "$TDIR/tokeer" 2>/dev/null || true
+chmod +x "$TDIR/mandarin-juice-cli" 2>/dev/null || true
 if [ "$MODE" = "ubisoft" ]; then
     echo "[2/6] Ubisoft mode: skipping native hook (not needed for the Proton folder flow)"
 elif [ -f "$TDIR/ost_native_hook.so" ]; then

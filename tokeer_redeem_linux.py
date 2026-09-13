@@ -29,6 +29,7 @@ Server URL resolution (first hit wins):
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import shutil
@@ -37,6 +38,16 @@ import sys
 import tempfile
 import urllib.request
 import urllib.error
+
+
+# RE Engine + Denuvo titles that crash on new-game without REFramework's
+# dinput8.dll in the game folder. On Linux the redeemer drops it in for them (the
+# install script's launch option already sets WINEDLLOVERRIDES="dinput8=n,b" so
+# Proton loads it), so the user never has to place it by hand.
+REFRAMEWORK_DINPUT8_GAMES = {"2246340", "2852190", "3764200", "3357650",
+                             "2054970", "3500390", "2638890"}
+REFRAMEWORK_DINPUT8_URL = "https://github.com/madoiscool/lt_api_links/releases/download/reframework/dinput8.dll"
+REFRAMEWORK_DINPUT8_SHA256 = "1dfe37dede668b5a969833ddfb2bbc933c83074e86fb03d46015690adf8a29f3"
 
 
 # --------------------------------------------------------------------------- #
@@ -287,6 +298,99 @@ def launch_game(app_id: str) -> None:
         log(f"  could not launch ({e}); run manually: {url}")
 
 
+def ticket_owner_steamid(appticket_hex: str) -> str:
+    """The owning SteamID64 encoded in an AppTicket, or "" if it can't be read."""
+    try:
+        data = bytes.fromhex((appticket_hex or "").strip())
+        if len(data) < 16:
+            return ""
+        sid = int.from_bytes(data[8:16], "little")
+        return str(sid) if sid >= 76561197960265728 else ""
+    except Exception:
+        return ""
+
+
+def find_install_dir(steam_root: str, app_id: str) -> str:
+    """The game's install folder, from appmanifest_<appid>.acf across libraries."""
+    import re
+    for root in _library_roots(steam_root):
+        acf = os.path.join(root, "steamapps", f"appmanifest_{app_id}.acf")
+        if not os.path.isfile(acf):
+            continue
+        try:
+            text = open(acf, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        m = re.search(r'"installdir"\s+"([^"]+)"', text, re.IGNORECASE)
+        if m:
+            p = os.path.join(root, "steamapps", "common", m.group(1))
+            if os.path.isdir(p):
+                return p
+    return ""
+
+
+# --------------------------------------------------------------------------- #
+# REFramework dinput8.dll
+# --------------------------------------------------------------------------- #
+def _sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest().lower()
+
+
+def _fetch_reframework_dll() -> str:
+    """A verified local dinput8.dll, downloaded once into ~/.tokeer/reframework and
+    re-used after. Returns "" on any failure."""
+    cache_dir = os.path.expanduser("~/.tokeer/reframework")
+    cached = os.path.join(cache_dir, "dinput8.dll")
+    try:
+        if os.path.isfile(cached) and _sha256(cached) == REFRAMEWORK_DINPUT8_SHA256:
+            return cached
+    except OSError:
+        pass
+    os.makedirs(cache_dir, exist_ok=True)
+    tmp = cached + ".part"
+    try:
+        req = urllib.request.Request(REFRAMEWORK_DINPUT8_URL, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) TokeerRedeem"})
+        with urllib.request.urlopen(req, timeout=180) as resp, open(tmp, "wb") as out:
+            shutil.copyfileobj(resp, out)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return ""
+    if _sha256(tmp) != REFRAMEWORK_DINPUT8_SHA256:
+        os.remove(tmp)
+        return ""
+    os.replace(tmp, cached)
+    return cached
+
+
+def place_reframework_dll(install_dir: str) -> None:
+    """Drop dinput8.dll into the game folder for RE Engine + Denuvo titles. Presence
+    check first: if it's already there, leave it. Best effort; never raises."""
+    if not install_dir:
+        log("  could not locate the game folder; skipping dinput8 placement")
+        return
+    target = os.path.join(install_dir, "dinput8.dll")
+    if os.path.isfile(target):
+        log("  dinput8.dll already present; leaving it")
+        return
+    src = _fetch_reframework_dll()
+    if not src:
+        log("  could not fetch dinput8.dll (the game may crash on new-game until it is placed)")
+        return
+    try:
+        shutil.copy2(src, target)
+        log("  placed dinput8.dll in the game folder")
+    except Exception as e:
+        log(f"  could not place dinput8.dll ({e})")
+
+
 # --------------------------------------------------------------------------- #
 def main() -> None:
     ap = argparse.ArgumentParser(description="Tokeer DRM redeemer (Linux/Proton).")
@@ -323,16 +427,44 @@ def main() -> None:
     prefix = find_prefix(steam_root, app_id)
     wine = find_wine(steam_root, args.wine)
 
-    log("[3/4] writing tickets into the game's Proton prefix ...")
+    log("[3/5] writing tickets into the game's Proton prefix ...")
     reg_body = build_reg_file(app_id, appticket, eticket)
     write_prefix_registry(wine, prefix, reg_body, args.dry_run)
 
+    install_dir = find_install_dir(steam_root, app_id)
+
+    # RE Engine + Denuvo titles need REFramework's dinput8.dll in the game folder
+    # or they crash on new-game. Place it before launch (the install script's
+    # launch option already sets WINEDLLOVERRIDES so Proton loads it).
+    log("[4/5] checking REFramework dinput8.dll ...")
+    if app_id in REFRAMEWORK_DINPUT8_GAMES and not args.dry_run:
+        place_reframework_dll(install_dir)
+    else:
+        log("  not needed for this game")
+
     if args.no_launch or args.dry_run:
-        log("[4/4] done (launch skipped).")
+        log("[5/5] done (launch skipped).")
         log(f"      Start the game yourself: steam://rungameid/{app_id}")
         return
-    log("[4/4] launching the game ...")
-    launch_game(app_id)
+
+    # Capcom RE Engine saves are signed per-account, so a new activation would make
+    # the game reject the previous save. For those games the carry-over re-signs the
+    # existing save onto this activation's id and launches the game itself.
+    log("[5/5] launching the game ...")
+    launched = False
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import tokeer_save_carry
+        if tokeer_save_carry.is_supported(app_id):
+            owner = ticket_owner_steamid(appticket)
+            if owner:
+                launched = tokeer_save_carry.carry_over(
+                    app_id, owner, steam_root=steam_root,
+                    install_dir=install_dir, log=log)
+    except Exception as e:
+        log(f"  save carry-over skipped ({e})")
+    if not launched:
+        launch_game(app_id)
     log("Done. If the game still shows a Denuvo/012/005 error, the game-side OST")
     log("hook likely isn't applying the ticket under Proton - tell me and we go deeper.")
 
