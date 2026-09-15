@@ -2,7 +2,7 @@
 #
 # Tokeer Linux / Proton - one-time per-game setup.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Tesla697/TokeerDRM-App/main/install_linux.sh | bash -s -- <APPID>
+#   curl -fsSL https://git.lua.tools/luatools-dedivision/TokeerDRM-App/raw/branch/main/install_linux.sh | bash -s -- <APPID>
 #
 # It downloads + builds the native Denuvo hook, auto-writes the game's Steam
 # launch option (and points it at a Proton if it has none), installs the
@@ -29,7 +29,7 @@ MODE="${2:-steam}"
 
 TDIR="${TOKEER_HOME:-$HOME/.tokeer}"
 SERVER="${TOKEER_DRM_SERVER:-https://luastools.xyz}"
-BUNDLE_URL="${TOKEER_BUNDLE_URL:-https://github.com/Tesla697/TokeerDRM-App/releases/latest/download/tokeer-linux.zip}"
+BUNDLE_URL="${TOKEER_BUNDLE_URL:-https://git.lua.tools/luatools-dedivision/TokeerDRM-App/releases/download/v1.0.28/tokeer-linux.zip}"
 
 echo "== Tokeer Linux setup - app $APPID =="
 mkdir -p "$TDIR"

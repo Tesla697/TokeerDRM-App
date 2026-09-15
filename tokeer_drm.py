@@ -46,7 +46,7 @@ except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
 APP_VERSION = "1.0.28"                       # bump on every release
-UPDATE_REPO = "Tesla697/TokeerDRM-App"      # GitHub repo whose latest release gates the app
+UPDATE_REPO = "luatools-dedivision/TokeerDRM-App"  # Forgejo repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
 # ---------------------------------------------------------------------------
@@ -404,9 +404,9 @@ class Api:
         """Compare this build with the latest GitHub release. update_required=True
         blocks the whole UI until the user updates."""
         info = {"current": APP_VERSION, "latest": APP_VERSION, "update_required": False,
-                "url": f"https://github.com/{UPDATE_REPO}/releases/latest"}
+                "url": f"https://git.lua.tools/{UPDATE_REPO}/releases/latest"}
         try:
-            r = requests.get(f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest",
+            r = requests.get(f"https://git.lua.tools/api/v1/repos/{UPDATE_REPO}/releases/latest",
                              headers={"User-Agent": "TokeerDRM"}, timeout=8)
             if r.status_code == 200:
                 d = r.json()
@@ -444,7 +444,7 @@ class Api:
 
         try:
             progress(5, "Finding the latest release…")
-            r = requests.get(f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest",
+            r = requests.get(f"https://git.lua.tools/api/v1/repos/{UPDATE_REPO}/releases/latest",
                              headers={"User-Agent": "TokeerDRM"}, timeout=20)
             r.raise_for_status()
             asset = next((a for a in r.json().get("assets", [])

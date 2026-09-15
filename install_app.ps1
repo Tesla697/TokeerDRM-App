@@ -2,7 +2,7 @@
 #  TokeerDRM App - one-click installer
 #  Downloads the latest TokeerDRM.exe, installs it to %LOCALAPPDATA%\TokeerDRM,
 #  makes Desktop + Start Menu shortcuts, and launches it.
-#  Run:  irm https://raw.githubusercontent.com/Tesla697/TokeerDRM-App/main/install_app.ps1 | iex
+#  Run:  irm https://git.lua.tools/luatools-dedivision/TokeerDRM-App/raw/branch/main/install_app.ps1 | iex
 # =============================================================================
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -19,8 +19,8 @@ Write-Host "`n=== TokeerDRM App Setup ===`n" -ForegroundColor Magenta
 # 1. find the latest release exe
 Step 'Finding the latest TokeerDRM release...'
 try {
-    $rel = Invoke-RestMethod 'https://api.github.com/repos/Tesla697/TokeerDRM-App/releases/latest' -Headers $UA
-} catch { Die "Couldn't reach GitHub: $($_.Exception.Message)" }
+    $rel = Invoke-RestMethod 'https://git.lua.tools/api/v1/repos/luatools-dedivision/TokeerDRM-App/releases/latest' -Headers $UA
+} catch { Die "Couldn't reach the release server: $($_.Exception.Message)" }
 $asset = $rel.assets | Where-Object { $_.name -match '(?i)\.exe$' } | Select-Object -First 1
 if (-not $asset) { Die 'No .exe found on the latest release.' }
 Good "Latest: $($rel.tag_name)"
