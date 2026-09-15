@@ -18,7 +18,16 @@ export default {
   async fetch(request) {
     let upstream;
     try {
-      upstream = await fetch(EXE, { redirect: "follow", cf: { cacheEverything: true, cacheTtl: 300 } });
+      // GitHub rejects asset requests with no User-Agent, and follows a 302 to
+      // its objects host - pass a UA and follow redirects. No cf cache options:
+      // they can choke on the redirect + large binary and surface as a 502.
+      upstream = await fetch(EXE, {
+        redirect: "follow",
+        headers: {
+          "User-Agent": "LuaToolsValidator-Mirror/1.0",
+          "Accept": "application/octet-stream",
+        },
+      });
     } catch (e) {
       return new Response("validator mirror fetch failed: " + e, { status: 502 });
     }
