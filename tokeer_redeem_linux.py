@@ -33,9 +33,11 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -82,6 +84,72 @@ def die(msg: str, code: int = 1):
     sys.exit(code)
 
 
+# Some machines (often ISP or router DNS that filters .xyz, or a stale negative
+# cache) can't resolve our host even though the rest of the internet works. When
+# that happens we fall back to DNS-over-HTTPS: we reach Cloudflare/Google by their
+# literal IPs (no system DNS needed), look the host up ourselves, and pin the
+# answer so the normal request goes through with the correct TLS name.
+_DOH_ENDPOINTS = (
+    "https://1.1.1.1/dns-query",
+    "https://1.0.0.1/dns-query",
+    "https://8.8.8.8/resolve",
+)
+
+
+def _is_name_resolution_error(exc: Exception) -> bool:
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, socket.gaierror):
+        return True
+    text = str(reason).lower()
+    return "name or service not known" in text or "temporary failure in name" in text \
+        or "nodename nor servname" in text or "getaddrinfo failed" in text
+
+
+def _doh_resolve(host: str) -> list[str]:
+    """Resolve host -> [ipv4...] via DoH, contacting the resolver by literal IP."""
+    ips: list[str] = []
+    for base in _DOH_ENDPOINTS:
+        try:
+            url = base + "?" + urllib.parse.urlencode({"name": host, "type": "A"})
+            req = urllib.request.Request(url, headers={
+                "Accept": "application/dns-json",
+                "User-Agent": "TokeerRedeem",
+            })
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            for ans in data.get("Answer", []):
+                if ans.get("type") == 1 and ans.get("data"):
+                    ips.append(ans["data"])
+            if ips:
+                return ips
+        except Exception:
+            continue
+    return ips
+
+
+_dns_pins: dict[str, str] = {}
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _pinned_getaddrinfo(host, *args, **kwargs):
+    pinned = _dns_pins.get(host)
+    if pinned:
+        return _orig_getaddrinfo(pinned, *args, **kwargs)
+    return _orig_getaddrinfo(host, *args, **kwargs)
+
+
+def _install_dns_fallback(host: str) -> bool:
+    """Pin host to a DoH-resolved IP so subsequent connections skip system DNS.
+    TLS/SNI still uses the real host name, so certificate validation is unaffected."""
+    ips = _doh_resolve(host)
+    if not ips:
+        return False
+    _dns_pins[host] = ips[0]
+    if socket.getaddrinfo is not _pinned_getaddrinfo:
+        socket.getaddrinfo = _pinned_getaddrinfo
+    return True
+
+
 def server_redeem(server: str, code: str) -> dict:
     """POST /drm/redeem {code} -> parsed json (raises on transport error)."""
     body = json.dumps({"code": code}).encode("utf-8")
@@ -101,15 +169,28 @@ def server_redeem(server: str, code: str) -> dict:
         },
         method="POST",
     )
-    try:
+    def _send():
         with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8", "replace")
-            status = resp.status
+            return resp.read().decode("utf-8", "replace"), resp.status
+
+    try:
+        raw, status = _send()
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", "replace")
         status = e.code
     except Exception as e:
-        die(f"server unreachable at {server}: {e}")
+        host = urllib.parse.urlparse(server).hostname or ""
+        if host and _is_name_resolution_error(e) and _install_dns_fallback(host):
+            log(f"      system DNS could not resolve {host}, using DNS-over-HTTPS ...")
+            try:
+                raw, status = _send()
+            except urllib.error.HTTPError as e2:
+                raw = e2.read().decode("utf-8", "replace")
+                status = e2.code
+            except Exception as e2:
+                die(f"server unreachable at {server}: {e2}")
+        else:
+            die(f"server unreachable at {server}: {e}")
     try:
         data = json.loads(raw)
     except Exception:
@@ -437,11 +518,29 @@ def _fetch_reframework_dll() -> str:
         pass
     os.makedirs(cache_dir, exist_ok=True)
     tmp = cached + ".part"
-    try:
+
+    def _download():
         req = urllib.request.Request(REFRAMEWORK_DINPUT8_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) TokeerRedeem"})
         with urllib.request.urlopen(req, timeout=180) as resp, open(tmp, "wb") as out:
             shutil.copyfileobj(resp, out)
+
+    try:
+        try:
+            _download()
+        except Exception as e:
+            # Same broken-DNS fallback as the redeem call. GitHub release URLs 302
+            # to a CDN, so pin both the front host and the asset host.
+            if _is_name_resolution_error(e):
+                ok = False
+                for h in ("github.com", "objects.githubusercontent.com",
+                          "release-assets.githubusercontent.com"):
+                    ok = _install_dns_fallback(h) or ok
+                if not ok:
+                    raise
+                _download()
+            else:
+                raise
     except Exception:
         try:
             os.remove(tmp)
