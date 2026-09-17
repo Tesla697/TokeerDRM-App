@@ -255,6 +255,85 @@ def build_reg_file(app_id: str, appticket_hex: str, eticket_hex: str) -> str:
     )
 
 
+def _hex_csv(h: str) -> str:
+    """Hex string -> 'aa,bb,cc' (lowercase byte pairs), the REG_BINARY form wine
+    stores in user.reg."""
+    h = (h or "").strip().replace(" ", "").replace("\n", "").replace(",", "")
+    return ",".join(h[i:i + 2].lower() for i in range(0, len(h), 2))
+
+
+def write_prefix_registry_direct(prefix: str, app_id: str, appticket_hex: str,
+                                 eticket_hex: str, dry_run: bool) -> bool:
+    """Write the tickets straight into the prefix's user.reg, no wine needed.
+
+    Proton's bundled wine can't always be exec'd on its own - some builds ship it as
+    a wrapper, or it only runs inside the Steam Linux Runtime container, which is why
+    shelling out to it threw 'Exec format error'. HKCU lives in user.reg and that one
+    key is all we touch, so we edit the file directly. Works on any distro and on the
+    Steam Deck with nothing installed. Returns True on success, False to let the
+    caller fall back to the wine method."""
+    import re
+    import time as _time
+
+    reg = os.path.join(prefix, "user.reg")
+    if not os.path.isfile(reg):
+        log("  user.reg not found; falling back to wine")
+        return False
+
+    owner = ticket_owner_steamid(appticket_hex)
+    key_hdr = "[Software\\\\Valve\\\\Steam\\\\Apps\\\\%s]" % app_id
+    block = (
+        f"{key_hdr} {int(_time.time())}\n"
+        f'"AppTicket"=hex:{_hex_csv(appticket_hex)}\n'
+        f'"ETicket"=hex:{_hex_csv(eticket_hex)}\n'
+        + (f'"SteamID"="{owner}"\n' if owner else '"SteamID"=-\n')
+    )
+
+    log(f"  prefix: {prefix}")
+    log(f"  writing HKCU\\Software\\Valve\\Steam\\Apps\\{app_id} directly into user.reg")
+    if dry_run:
+        log("  (dry-run) not writing. Block would be:\n" + block)
+        return True
+
+    # Read byte-preserving so any non-ASCII keys elsewhere in the file survive
+    # untouched (surrogateescape round-trips arbitrary bytes).
+    try:
+        with open(reg, encoding="utf-8", errors="surrogateescape") as f:
+            text = f.read()
+    except OSError as e:
+        log(f"  couldn't read user.reg ({e}); falling back to wine")
+        return False
+    if "WINE REGISTRY" not in text and "[" not in text:
+        log("  user.reg doesn't look like a wine registry; falling back to wine")
+        return False
+
+    # Drop any existing block for this exact app key (header line through the last
+    # of its values), then append a fresh one.
+    pat = re.compile(
+        r"(?ms)^\[Software\\\\Valve\\\\Steam\\\\Apps\\\\" + re.escape(app_id)
+        + r"\].*?(?=^\[|\Z)"
+    )
+    new_text = pat.sub("", text)
+    if not new_text.endswith("\n"):
+        new_text += "\n"
+    new_text += "\n" + block
+
+    # Atomic write with a one-time backup so a bad edit can never brick the prefix.
+    bak = reg + ".tokeerbak"
+    try:
+        if not os.path.exists(bak):
+            shutil.copy2(reg, bak)
+        tmp = reg + ".tokeer.tmp"
+        with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as f:
+            f.write(new_text)
+        os.replace(tmp, reg)
+    except OSError as e:
+        log(f"  couldn't write user.reg ({e}); falling back to wine")
+        return False
+    log("  registry written OK (direct, no wine)")
+    return True
+
+
 def write_prefix_registry(wine: str, prefix: str, reg_body: str, dry_run: bool) -> None:
     tmp = tempfile.NamedTemporaryFile("w", suffix=".reg", delete=False, encoding="utf-8")
     tmp.write(reg_body)
@@ -272,8 +351,14 @@ def write_prefix_registry(wine: str, prefix: str, reg_body: str, dry_run: bool) 
         return
     try:
         r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=120)
-    finally:
-        pass
+    except OSError as e:
+        # ENOEXEC etc: this Proton build's wine can't be launched directly.
+        die(
+            "couldn't run the Proton wine binary ({}).\n"
+            "  wine: {}\n"
+            "  This Proton build's wine can't be executed on its own. Update the app so it\n"
+            "  writes the ticket directly, or pass --wine to a working wine binary.".format(e, wine)
+        )
     if r.returncode != 0:
         # keep the temp file for debugging
         die(
@@ -512,11 +597,16 @@ def main() -> None:
     log("[2/4] locating Steam + Proton prefix ...")
     steam_root = find_steam_root(args.steam_root)
     prefix = find_prefix(steam_root, app_id)
-    wine = find_wine(steam_root, args.wine)
 
     log("[3/5] writing tickets into the game's Proton prefix ...")
-    reg_body = build_reg_file(app_id, appticket, eticket)
-    write_prefix_registry(wine, prefix, reg_body, args.dry_run)
+    # Edit user.reg directly first - it needs no wine and can't hit the Proton
+    # 'Exec format error'. Only fall back to importing via wine if that can't apply
+    # (missing/odd user.reg), and locate wine lazily so a broken Proton binary never
+    # blocks the direct path.
+    if not write_prefix_registry_direct(prefix, app_id, appticket, eticket, args.dry_run):
+        wine = find_wine(steam_root, args.wine)
+        reg_body = build_reg_file(app_id, appticket, eticket)
+        write_prefix_registry(wine, prefix, reg_body, args.dry_run)
 
     install_dir = find_install_dir(steam_root, app_id)
 
