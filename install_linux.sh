@@ -36,11 +36,11 @@ mkdir -p "$TDIR"
 
 # 1) Get the bundle (hook source + scripts). If we're launched from inside an
 #    already-unzipped bundle, use that instead of downloading.
-need=(ost_native_hook.c ost-run.sh build.sh tokeer_redeem_linux.py tokeer tokeer_steam_config.py tokeer_validate_linux.py)
+need=(ost_native_hook.c ost-run.sh build.sh tokeer_redeem_linux.py tokeer tokeer_steam_config.py tokeer_validate_linux.py tokeer_version_lock.py)
 have_local=1
 for f in "${need[@]}"; do [ -f "./$f" ] || have_local=0; done
 if [ "$have_local" = 1 ]; then
-    echo "[1/6] using bundle from current directory"
+    echo "[1/7] using bundle from current directory"
     cp -f "${need[@]}" "$TDIR"/
     [ -f ./ost_native_hook.so ] && cp -f ./ost_native_hook.so "$TDIR"/ || true
     # Optional save-carry tools (RE Engine save re-sign). Absent = feature off.
@@ -48,7 +48,7 @@ if [ "$have_local" = 1 ]; then
     cp -f ./mandarin-juice-cli "$TDIR"/ 2>/dev/null || true
     for pf in ./*.bin; do [ -f "$pf" ] && cp -f "$pf" "$TDIR"/; done
 else
-    echo "[1/6] downloading bundle -> $BUNDLE_URL"
+    echo "[1/7] downloading bundle -> $BUNDLE_URL"
     tmp="$(mktemp -d)"
     curl -fsSL "$BUNDLE_URL" -o "$tmp/b.zip"
     unzip -oq "$tmp/b.zip" -d "$tmp/x"
@@ -66,12 +66,12 @@ printf 'SERVER_URL = "%s"\n' "$SERVER" > "$TDIR/server_config.py"
 chmod +x "$TDIR/build.sh" "$TDIR/ost-run.sh" "$TDIR/tokeer" 2>/dev/null || true
 chmod +x "$TDIR/mandarin-juice-cli" 2>/dev/null || true
 if [ "$MODE" = "ubisoft" ]; then
-    echo "[2/6] Ubisoft mode: skipping native hook (not needed for the Proton folder flow)"
+    echo "[2/7] Ubisoft mode: skipping native hook (not needed for the Proton folder flow)"
 elif [ -f "$TDIR/ost_native_hook.so" ]; then
-    echo "[2/6] preparing native hook..."
+    echo "[2/7] preparing native hook..."
     echo "  using prebuilt ost_native_hook.so"
 elif command -v gcc >/dev/null 2>&1; then
-    echo "[2/6] preparing native hook..."
+    echo "[2/7] preparing native hook..."
     ( cd "$TDIR" && ./build.sh )
 else
     echo "ERROR: no prebuilt ost_native_hook.so and gcc is not installed." >&2
@@ -83,7 +83,7 @@ fi
 # 4) Install the `tokeer` command on PATH.
 mkdir -p "$HOME/.local/bin"
 ln -sf "$TDIR/tokeer" "$HOME/.local/bin/tokeer"
-echo "[3/6] installed 'tokeer' -> ~/.local/bin/tokeer"
+echo "[3/7] installed 'tokeer' -> ~/.local/bin/tokeer"
 # Make `tokeer` runnable by name in future shells: append ~/.local/bin to PATH in
 # whichever rc files exist (bash AND zsh - Arch/SteamOS often default to zsh, and
 # a bash-only line wouldn't help there). Idempotent. Only affects NEW terminals;
@@ -122,10 +122,10 @@ fi
 #    Ubisoft mode SKIPS this: the game must launch normally under Proton, not
 #    through the Denuvo hook, so writing ost-run.sh here would break it.
 if [ "$MODE" = "ubisoft" ]; then
-    echo "[4/6] Ubisoft mode: skipping Steam launch option (game runs folder-based under Proton)"
+    echo "[4/7] Ubisoft mode: skipping Steam launch option (game runs folder-based under Proton)"
 else
     LAUNCH="WINEDLLOVERRIDES=\"dinput8=n,b\" $TDIR/ost-run.sh %command%"
-    echo "[4/6] writing Steam launch options (Steam will restart)..."
+    echo "[4/7] writing Steam launch options (Steam will restart)..."
     if pgrep -x steam >/dev/null 2>&1; then
         steam -shutdown >/dev/null 2>&1 || true
         for _ in $(seq 1 20); do pgrep -x steam >/dev/null 2>&1 || break; sleep 1; done
@@ -135,13 +135,25 @@ else
     python3 "$TDIR/tokeer_steam_config.py" "$APPID" "$LAUNCH" || true
 fi
 
-# 6) Create the Proton prefix by launching once (it fails Denuvo - expected -
+# 6) Version lock, for a game whose newest Steam build breaks the activation.
+#    Writes the pinned script, the build's manifests and the slsteam pin, so the
+#    update Steam offers next is the downgrade. Steam is already shut down here
+#    (step 5), which is when the pin is cheapest to write. Non-fatal: verify
+#    runs the same thing and reports what is missing.
+if [ -f "$TDIR/tokeer_version_lock.py" ]; then
+    echo "[5/7] checking for a version lock..."
+    python3 "$TDIR/tokeer_version_lock.py" "$APPID" || true
+else
+    echo "[5/7] no version lock tool in this bundle, skipping"
+fi
+
+# 7) Create the Proton prefix by launching once (it fails Denuvo - expected -
 #    but that first run is what builds compatdata/<appid>/pfx).
-echo "[5/6] launching once to create the Proton prefix (first launch fails Denuvo - that's normal)..."
+echo "[6/7] launching once to create the Proton prefix (first launch fails Denuvo - that's normal)..."
 ( setsid steam "steam://rungameid/$APPID" >/dev/null 2>&1 & ) || \
     ( setsid xdg-open "steam://rungameid/$APPID" >/dev/null 2>&1 & ) || true
 
-echo "[6/6] done."
+echo "[7/7] done."
 echo
 echo "Setup complete for app $APPID."
 if [ "$MODE" = "ubisoft" ]; then

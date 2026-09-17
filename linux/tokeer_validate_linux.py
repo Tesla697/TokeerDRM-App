@@ -12,6 +12,8 @@ Checks, for <appid>:
   - native hook built      (~/.tokeer/ost_native_hook.so)
   - Steam launch option set to ost-run.sh for this game
   - which Proton it's mapped to (informational)
+  - for a version-locked game, that the lock is applied and Steam has
+    downgraded to the supported build (tokeer_version_lock.py)
 
 Pure stdlib (Steam Deck system python). Run via:  tokeer verify <APPID>
 
@@ -29,6 +31,11 @@ import os
 import re
 import sys
 import time
+
+try:
+    import tokeer_version_lock as vlock
+except ImportError:
+    vlock = None
 
 # Shared with the bot's LINUX_VALIDATE_SECRET (cogs/tokeer.py). Keep in sync.
 SECRET = b"tokeer_linux_setup_validate_2026_v1_shared"
@@ -157,6 +164,18 @@ def main():
     # runs from the game folder, not through the Denuvo native hook).
     mode = "ubisoft" if (len(sys.argv) > 2 and sys.argv[2].lower() == "ubisoft") else "steam"
 
+    # A version-locked game only activates on one build, so put the lock in
+    # place (pinned script + the build's manifests + the slsteam pin) and stop
+    # here until Steam has actually run the downgrade. No code is printed while
+    # the game is on the broken build - it would only burn an activation.
+    lock = None
+    if vlock is not None and vlock.is_locked(appid):
+        lock = vlock.apply(appid)
+        vlock.print_status(lock)
+        if not lock["ready"]:
+            vlock.print_next_steps(lock)
+            sys.exit(1)
+
     print(f"Checking Tokeer {mode} setup for app {appid} ...")
     installdir, manifest = find_install(appid)
     size, exes = folder_stats(installdir)
@@ -173,6 +192,8 @@ def main():
         "launch_opt": launch_option_set(appid),
         "proton": compat_tool(appid),
     }
+    if lock:
+        report["lock"] = vlock.summary(lock)
 
     def mark(ok):
         return "OK " if ok else "-- "

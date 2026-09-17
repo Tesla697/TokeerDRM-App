@@ -38,6 +38,7 @@ FILES = [
     ("tokeer_redeem_linux.py", False),
     ("linux/tokeer_steam_config.py", False),
     ("linux/tokeer_validate_linux.py", False),
+    ("linux/tokeer_version_lock.py", False),
     # Capcom RE Engine save carry-over: the module, the official linux CLI, and the
     # per-game profiles. All land flat next to the module after install.
     ("linux/tokeer_save_carry.py", False),

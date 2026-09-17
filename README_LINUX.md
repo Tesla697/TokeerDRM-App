@@ -49,6 +49,23 @@ That's it - the game activates and launches. The code is single-use and expires
 ~30 minutes after it's issued, so run it promptly. If `~/.local/bin` isn't on your
 PATH, use `~/.tokeer/tokeer <CODE>`.
 
+## Version-locked games
+
+A few games only activate on one older Steam build (right now Assassin's Creed
+Black Flag Resynced and EA SPORTS FC 26). For those, `install_linux.sh` and
+`tokeer verify` put the lock in place for you: the pinned script goes into
+`config/stplug-in`, the build's manifests go into `~/.config/SLSsteam/manifests`,
+and the pin itself into `ManifestPins` in `~/.config/SLSsteam/config.yaml`.
+
+Restart Steam afterwards. The game then shows an **Update** that is really the
+downgrade - run it, wait until Steam lists the game as fully installed, then run
+`tokeer verify <APPID>` again. No setup code is printed while the game is still
+on the broken build. Once the game is on the locked build, the pin freezes it
+there, so Steam will not pull the broken build back.
+
+You can run it on its own with `tokeer lock <APPID>`. This needs luatools-moon /
+slsteam-moon installed, since the pin is its feature.
+
 ## RE Engine games (Monster Hunter Wilds / Stories 3, etc.)
 
 These also need REFramework's `dinput8.dll` in the **game folder** (the ticket

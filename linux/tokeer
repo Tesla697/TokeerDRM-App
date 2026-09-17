@@ -17,7 +17,20 @@ if [ $# -lt 1 ]; then
     echo "       tokeer <CODE>               # activate + launch"
     echo "       tokeer <CODE> --no-launch   # write the ticket only"
     echo "       tokeer resign [APPID]       # re-sign the save if it won't load (no code needed)"
+    echo "       tokeer lock <APPID>         # force the supported build of a version-locked game"
     exit 1
+fi
+
+# `tokeer lock <APPID>` -> write the version lock for a game whose newest Steam
+# build breaks activation, then tell the user to run Steam's "update" (which the
+# pin turns into the downgrade). verify runs this on its own too.
+if [ "$1" = "lock" ]; then
+    shift
+    if [ ! -f "$TDIR/tokeer_version_lock.py" ]; then
+        echo "ERROR: version lock tool missing. Re-run install_linux.sh <APPID>." >&2
+        exit 1
+    fi
+    exec python3 "$TDIR/tokeer_version_lock.py" "$@"
 fi
 
 # `tokeer verify <APPID>` (Steam) / `tokeer verify-ubi <APPID>` (Ubisoft) ->
