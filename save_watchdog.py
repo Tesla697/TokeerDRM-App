@@ -6,11 +6,14 @@ account's userdata folder, which stays the same across activations. So the save
 folder is stable while the file inside is signed for the previous activation, and
 after a new activation the game rejects it and starts over.
 
-This runs right after an activation. It snapshots the signed-in account's current
-save, launches the game so Steam initialises the folder, kills it once the folder
-is there, re-signs the save onto the new activation's id in a command prompt the
-user can watch, writes it back into the signed-in account's folder, and relaunches
-the game so it loads the carried-over progress.
+This runs right after an activation, BEFORE the game opens. The save folder
+already exists (the account has played before) and the new activation's id is
+known from the appticket, so there is nothing the game needs to create first. It
+makes sure the game isn't running, snapshots the signed-in account's save,
+re-signs it onto the new id in a command prompt the user can watch, writes it
+back, and only then launches the game, once, so it loads the carried-over save.
+Older builds launched the game, killed it and relaunched, and the kill didn't
+always land.
 
 The save's current id is read off disk each time (brute-forced) rather than
 guessed, so it never goes stale. Everything here is best effort: any failure is
@@ -38,11 +41,9 @@ SUPPORTED = {
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _NEW_CONSOLE = 0x00000010 if sys.platform == "win32" else 0
 
-# Once the game is up and its save folder exists, wait this long (a short grace so
-# it finishes booting) then kill it. And never wait longer than the cap for the
-# folder to show up, so the carry-over runs instead of hanging.
-_KILL_GRACE_SECONDS = 5
-_FOLDER_CAP_SECONDS = 120
+# If the game is already open when a code is redeemed and we can't close it (it
+# runs elevated, say), wait this long for the user to close it themselves.
+_CLOSE_WAIT_SECONDS = 600
 
 
 def is_supported(app_id: str) -> bool:
@@ -317,6 +318,35 @@ def _game_procs(install_dir: str) -> list:
         return []
 
 
+def _root_exes(install_dir: str) -> set:
+    """Lower-case names of the .exe files at the top of the install dir. The main
+    game exe always sits there for these games."""
+    try:
+        return {n.lower() for n in os.listdir(install_dir) if n.lower().endswith(".exe")}
+    except Exception:
+        return set()
+
+
+def _running_images(install_dir: str) -> set:
+    """Which of the game's exe names tasklist shows running. This still works when
+    the game runs elevated, where Win32_Process hides ExecutablePath from us and
+    _game_procs sees nothing."""
+    names = _root_exes(install_dir)
+    if not names:
+        return set()
+    try:
+        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True,
+                            text=True, timeout=30, creationflags=_NO_WINDOW).stdout or ""
+    except Exception:
+        return set()
+    running = {line.split('","')[0].strip('"').lower() for line in out.splitlines() if line}
+    return names & running
+
+
+def _game_running(install_dir: str) -> bool:
+    return bool(_game_procs(install_dir) or _running_images(install_dir))
+
+
 def _kill_game(install_dir: str) -> None:
     for pid in _game_procs(install_dir):
         try:
@@ -324,6 +354,34 @@ def _kill_game(install_dir: str) -> None:
                           capture_output=True, creationflags=_NO_WINDOW)
         except Exception:
             pass
+    for name in _running_images(install_dir):
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", name],
+                          capture_output=True, creationflags=_NO_WINDOW)
+        except Exception:
+            pass
+
+
+def _ensure_closed(install_dir: str, log) -> bool:
+    """Make sure the game isn't holding the save. Normally it isn't open at all.
+    If it is, close it; if that fails, ask the user to close it and wait."""
+    if not install_dir or not _game_running(install_dir):
+        return True
+    log("Closing the game so your save can be carried over...")
+    _kill_game(install_dir)
+    for _ in range(15):
+        if not _game_running(install_dir):
+            time.sleep(2)  # let it release the save files
+            return True
+        time.sleep(1)
+    log("Please close the game. Your save will carry over as soon as it's closed.")
+    deadline = time.time() + _CLOSE_WAIT_SECONDS
+    while time.time() < deadline:
+        if not _game_running(install_dir):
+            time.sleep(2)
+            return True
+        time.sleep(2)
+    return False
 
 
 def _launch(app_id: str) -> None:
@@ -335,50 +393,6 @@ def _launch(app_id: str) -> None:
             webbrowser.open("steam://rungameid/%s" % app_id)
     except Exception:
         pass
-
-
-def _wait_until_running(install_dir: str, deadline: float, log) -> bool:
-    """Wait for the game process to appear after we launch it. Returns True as soon
-    as it is running so the caller can kill it and swap the save in. Without a
-    process to watch (unknown install dir) it cannot drive the cycle."""
-    if not install_dir:
-        log("Could not locate the game to watch; leaving saves alone.")
-        return False
-    log("Waiting for the game to start...")
-    while time.time() < deadline:
-        if _game_procs(install_dir):
-            return True
-        time.sleep(1)
-    return False
-
-
-def _appid_folders(steam: str, app_id: str) -> set:
-    """The set of userdata folder names that currently have this game's save dir."""
-    ud = os.path.join(steam, "userdata")
-    out = set()
-    try:
-        for name in os.listdir(ud):
-            if os.path.isdir(os.path.join(ud, name, app_id)):
-                out.add(name)
-    except Exception:
-        pass
-    return out
-
-
-def _settle_and_kill(steam, app_id, install_dir, target, base_folders, log) -> None:
-    """Kill the game as soon as its save folder is available: either the target
-    folder already exists (the usual case, the account has played before), or the
-    game just created a new userdata folder. Then a short grace so it finishes
-    booting, then kill. Capped so it never hangs if the folder never appears."""
-    deadline = time.time() + _FOLDER_CAP_SECONDS
-    while time.time() < deadline:
-        if not _game_procs(install_dir):
-            break  # game exited on its own
-        if os.path.isdir(target) or (_appid_folders(steam, app_id) - base_folders):
-            break
-        time.sleep(1)
-    time.sleep(_KILL_GRACE_SECONDS)
-    _kill_game(install_dir)
 
 
 def _logged_in_account32(steam: str) -> str:
@@ -438,8 +452,9 @@ def _restore(app_id: str, new_id: str, log) -> None:
 
     # The game reads and writes its save ONLY in the signed-in account's folder, so
     # that folder holds the latest progress and is also where the carried save goes.
-    # Never source from other userdata folders: they can be stale leftovers (an
-    # older activation's copy), and carrying one back would revert progress.
+    # While that folder has a save, never source from other userdata folders: they
+    # can be stale leftovers (an older activation's copy), and carrying one back
+    # would revert progress.
     if active:
         target_remote = os.path.join(steam, "userdata", active, app_id, "remote")
     else:
@@ -448,14 +463,45 @@ def _restore(app_id: str, new_id: str, log) -> None:
         target_remote = best[3] if best else ""
 
     df = _save_data_folder(target_remote) if target_remote else None
+    if not df and active:
+        # First time on this Steam account: its folder has no save yet, so there is
+        # no newer progress a leftover could overwrite. Bring over the biggest save
+        # from any other userdata folder and re-sign it into this account's folder.
+        best = _biggest_save(steam, app_id)
+        if best:
+            log("No save on this Steam account yet; bringing over your save from another folder.")
+            df = best[:3]
     if not df:
-        log("No save in your account folder to carry; opening the game.")
+        log("No save found to carry; opening the game.")
         _launch(app_id)
         return
     old_data, _old_bytes, rel = df
     target = os.path.join(target_remote, rel) if rel else target_remote
 
-    # Snapshot the real save NOW, before the game can overwrite it with a fresh one.
+    # The game must not be open while we swap the save. Usually it isn't yet: this
+    # runs before we launch it.
+    if not _ensure_closed(install_dir, log):
+        log("The game is still open, so your save was not carried over this time.")
+        return
+
+    try:
+        cli, profiles = _tools()
+    except Exception as e:
+        log("Save tools unavailable (%s); opening the game." % e)
+        _launch(app_id)
+        return
+    profile = os.path.join(profiles, profile_name)
+    if not os.path.isfile(profile):
+        log("No save profile for this game; opening the game.")
+        _launch(app_id)
+        return
+    if not _has_dotnet10():
+        log("Carrying the save over needs the .NET 10 Desktop Runtime. Install it "
+            "from https://dotnet.microsoft.com/download/dotnet/10.0 and redeem again.")
+        _launch(app_id)
+        return
+
+    # Snapshot the real save, then re-sign the copy (MandarinJuice never touches it).
     work = os.path.join(os.environ.get("TEMP", "."),
                         "ltsave_%s_%d" % (app_id, int(time.time())))
 
@@ -465,49 +511,18 @@ def _restore(app_id: str, new_id: str, log) -> None:
     try:
         shutil.copytree(old_data, work, ignore=_skip_cache)
     except Exception as e:
-        log("Could not stage the save (%s); skipping." % e)
+        log("Could not stage the save (%s); opening the game." % e)
+        _launch(app_id)
         return
 
-    # Note which userdata folders exist before launch, to spot a newly created one.
-    base_folders = _appid_folders(steam, app_id)
-
-    # Open the game, wait for it to start, then kill it as soon as its save folder
-    # is there, so nothing holds the files while we swap them in.
-    log("Launching the game...")
-    _launch(app_id)
-    deadline = time.time() + 1800
-    if not _wait_until_running(install_dir, deadline, log):
-        log("Game did not start; leaving saves alone.")
-        shutil.rmtree(work, ignore_errors=True)
-        return
-    log("Closing the game to swap your save in...")
-    _settle_and_kill(steam, app_id, install_dir, target, base_folders, log)
-    time.sleep(3)
-
-    try:
-        cli, profiles = _tools()
-    except Exception as e:
-        log("Save tools unavailable (%s); skipping." % e)
-        shutil.rmtree(work, ignore_errors=True)
-        return
-    profile = os.path.join(profiles, profile_name)
-    if not os.path.isfile(profile):
-        log("No save profile for this game; skipping.")
-        shutil.rmtree(work, ignore_errors=True)
-        return
-    if not _has_dotnet10():
-        log("Carrying the save over needs the .NET 10 Desktop Runtime. Install it "
-            "from https://dotnet.microsoft.com/download/dotnet/10.0 and relaunch.")
-        shutil.rmtree(work, ignore_errors=True)
-        return
-
-    log("Opening the resigner...")
+    log("Carrying your save over before the game starts...")
     since = time.time()
     _resign_console(cli, profile, work, new_uid)
     files = _resigned_files(os.path.dirname(cli), since)
     if not files:
         shutil.rmtree(work, ignore_errors=True)
-        log("Re-signing failed; your account was not changed.")
+        log("Re-signing failed; your save was not changed. Opening the game.")
+        _launch(app_id)
         return
 
     # Back up the untouched save once, OUTSIDE the cloud-synced remote folder, from
@@ -552,12 +567,16 @@ def _restore(app_id: str, new_id: str, log) -> None:
     except Exception:
         pass
 
-    log("Carried your save over. Restarting the game...")
+    log("Carried your save over. Starting the game...")
     _launch(app_id)
 
 
 _armed = set()
 _armed_lock = threading.Lock()
+# When each (game, activation) last finished a carry-over. redeem() and run_game()
+# both call start() for the same activation; if the first run already launched the
+# game, the second must not close it again to carry the same save twice.
+_finished: dict = {}
 
 
 def start(app_id: str, new_id: str, log=None) -> None:
@@ -570,7 +589,7 @@ def start(app_id: str, new_id: str, log=None) -> None:
         return
 
     with _armed_lock:
-        if app_id in _armed:
+        if app_id in _armed or time.time() - _finished.get((app_id, str(new_id)), 0) < 60:
             return
         _armed.add(app_id)
 
@@ -582,5 +601,6 @@ def start(app_id: str, new_id: str, log=None) -> None:
         finally:
             with _armed_lock:
                 _armed.discard(app_id)
+                _finished[(app_id, str(new_id))] = time.time()
 
     threading.Thread(target=worker, daemon=True).start()

@@ -7,10 +7,10 @@ the save in the SIGNED-IN account's userdata folder, which never changes across
 activations. So the save folder is stable while the file inside is signed for
 the previous activation, and after a new activation the game rejects it.
 
-Right after a redeem this snapshots the signed-in account's save, launches the
-game so Steam creates the folder, kills it once the folder is there, re-signs the
-save onto the new activation's id with the official mandarin-juice-cli (linux),
-writes it back, drops the stale cache, and relaunches so the game loads the
+Right after a redeem, before the game opens, this snapshots the signed-in
+account's save (closing the game first only if it was already running), re-signs
+it onto the new activation's id with the official mandarin-juice-cli (linux),
+writes it back, drops the stale cache, and then launches the game so it loads the
 carried-over progress.
 
 The save's current id is read off disk each time (brute-forced) rather than

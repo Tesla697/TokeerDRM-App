@@ -495,6 +495,10 @@ function setUpdateProgress(p, m) {
 // matching notes once, then remembers the version so it never nags again. Add a
 // new entry here every release.
 const PATCH_NOTES = {
+  "1.0.29": [
+    "Save carry-over no longer opens and closes the game. Your save is moved to the new activation first (you'll see a command prompt for a couple of minutes), then the game opens once with your progress.",
+    "If the game is already open when you redeem, the app closes it for you, or asks you to close it if it can't.",
+  ],
   "1.0.28": [
     "Your existing save now carries over automatically when you activate on a new account, for Resident Evil Requiem, PRAGMATA, Monster Hunter Stories 3 and Onimusha. The first launch may briefly open and close the game and show a command prompt while the save transfers, then it opens on its own.",
     "After you paste a code, the app now launches the game for you instead of asking you to open it from Steam.",

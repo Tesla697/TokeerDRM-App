@@ -45,7 +45,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.28"                       # bump on every release
+APP_VERSION = "1.0.29"                       # bump on every release
 UPDATE_REPO = "luatools-dedivision/TokeerDRM-App"  # Forgejo repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -908,8 +908,8 @@ class Api:
             _LAST_ACTIVATION[app_id] = owner
 
         # Arm the save carry-over now, whether the user launches from the one-click
-        # flow (run_game) or manually from Steam. It waits for the new activation
-        # folder to appear, then re-signs the previous save onto it.
+        # flow (run_game) or manually from Steam. It re-signs the save onto this
+        # activation before the game opens, then launches the game itself.
         if owner and save_watchdog.is_supported(app_id):
             save_watchdog.start(app_id, owner, log=lambda m: _push_progress(50, m))
 
@@ -924,10 +924,10 @@ class Api:
         app_id = "".join(c for c in str(app_id) if c.isdigit())
         if not app_id:
             return {"ok": False, "error": "No app id to launch."}
-        # Capcom RE Engine games sign saves to the activation account and land them
-        # in that account's userdata folder, so a new activation starts fresh. The
-        # watchdog launches the game itself and carries the previous save over, so
-        # hand off to it instead of launching here (guarded against double-arming).
+        # Capcom RE Engine games sign saves to the activation account, so a new
+        # activation rejects the old save. The watchdog re-signs it first and then
+        # launches the game itself, so hand off to it instead of launching here
+        # (guarded against double-arming).
         if save_watchdog.is_supported(app_id):
             new_id = _LAST_ACTIVATION.get(app_id) or _current_steam_id()
             save_watchdog.start(app_id, new_id,
