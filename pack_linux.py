@@ -39,6 +39,9 @@ FILES = [
     ("linux/tokeer_steam_config.py", False),
     ("linux/tokeer_validate_linux.py", False),
     ("linux/tokeer_version_lock.py", False),
+    # EA (anadius folder flow): patch anadius64 for Wine, write the launch option,
+    # surface the token_req, and apply the token into dbdata.json.
+    ("linux/ea_tokeer_linux.py", False),
     # Capcom RE Engine save carry-over: the module, the official linux CLI, and the
     # per-game profiles. All land flat next to the module after install.
     ("linux/tokeer_save_carry.py", False),

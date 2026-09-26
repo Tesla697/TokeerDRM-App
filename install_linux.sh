@@ -18,13 +18,16 @@ set -euo pipefail
 
 APPID="${1:-}"
 if ! [[ "$APPID" =~ ^[0-9]+$ ]]; then
-    echo "usage: install_linux.sh <APPID> [ubisoft]   (numeric Steam AppID)" >&2
+    echo "usage: install_linux.sh <APPID> [ubisoft|ea]   (numeric Steam AppID)" >&2
     exit 1
 fi
 # "ubisoft" mode installs the tokeer tools only: it does NOT build the native
 # Denuvo hook and does NOT write a Steam launch option. Ubisoft games run
 # folder-based under Proton (upc_r2 + dbdata), so the hook/launch option would
 # break them. It still creates the Proton prefix so verify-ubi can pass.
+# "ea" mode is the EA/anadius folder flow: like ubisoft it skips the native hook,
+# but instead of the ost-run launch option it hands off to ea_tokeer_linux.py,
+# which patches anadius64.dll for Wine and writes the crack-exe launch option.
 MODE="${2:-steam}"
 
 TDIR="${TOKEER_HOME:-$HOME/.tokeer}"
@@ -36,7 +39,7 @@ mkdir -p "$TDIR"
 
 # 1) Get the bundle (hook source + scripts). If we're launched from inside an
 #    already-unzipped bundle, use that instead of downloading.
-need=(ost_native_hook.c ost-run.sh build.sh tokeer_redeem_linux.py tokeer tokeer_steam_config.py tokeer_validate_linux.py tokeer_version_lock.py)
+need=(ost_native_hook.c ost-run.sh build.sh tokeer_redeem_linux.py tokeer tokeer_steam_config.py tokeer_validate_linux.py tokeer_version_lock.py ea_tokeer_linux.py)
 have_local=1
 for f in "${need[@]}"; do [ -f "./$f" ] || have_local=0; done
 if [ "$have_local" = 1 ]; then
@@ -65,8 +68,8 @@ printf 'SERVER_URL = "%s"\n' "$SERVER" > "$TDIR/server_config.py"
 #    Ubisoft mode skips this entirely (the folder-based flow doesn't use it).
 chmod +x "$TDIR/build.sh" "$TDIR/ost-run.sh" "$TDIR/tokeer" 2>/dev/null || true
 chmod +x "$TDIR/mandarin-juice-cli" 2>/dev/null || true
-if [ "$MODE" = "ubisoft" ]; then
-    echo "[2/7] Ubisoft mode: skipping native hook (not needed for the Proton folder flow)"
+if [ "$MODE" = "ubisoft" ] || [ "$MODE" = "ea" ]; then
+    echo "[2/7] $MODE mode: skipping native hook (not needed for the Proton folder flow)"
 elif [ -f "$TDIR/ost_native_hook.so" ]; then
     echo "[2/7] preparing native hook..."
     echo "  using prebuilt ost_native_hook.so"
@@ -121,7 +124,13 @@ fi
 # 5) Auto-write the Steam launch option (Steam must be closed while we edit).
 #    Ubisoft mode SKIPS this: the game must launch normally under Proton, not
 #    through the Denuvo hook, so writing ost-run.sh here would break it.
-if [ "$MODE" = "ubisoft" ]; then
+if [ "$MODE" = "ea" ]; then
+    echo "[4/7] EA mode: patching anadius64 + writing the crack-exe launch option..."
+    # ea_tokeer setup patches anadius64.dll for Wine, finds the crack exe, writes
+    # the Steam launch option that swaps %command%'s exe for it, and (step 7 below
+    # is skipped for ea) builds the prefix. Steam is already shut down here.
+    python3 "$TDIR/ea_tokeer_linux.py" setup "$APPID" || true
+elif [ "$MODE" = "ubisoft" ]; then
     echo "[4/7] Ubisoft mode: skipping Steam launch option (game runs folder-based under Proton)"
 else
     LAUNCH="WINEDLLOVERRIDES=\"dinput8=n,b\" $TDIR/ost-run.sh %command%"
@@ -140,7 +149,9 @@ fi
 #    update Steam offers next is the downgrade. Steam is already shut down here
 #    (step 5), which is when the pin is cheapest to write. Non-fatal: verify
 #    runs the same thing and reports what is missing.
-if [ -f "$TDIR/tokeer_version_lock.py" ]; then
+if [ "$MODE" = "ea" ]; then
+    echo "[5/7] EA mode: skipping version lock (n/a)"
+elif [ -f "$TDIR/tokeer_version_lock.py" ]; then
     echo "[5/7] checking for a version lock..."
     python3 "$TDIR/tokeer_version_lock.py" "$APPID" || true
 else
@@ -148,15 +159,28 @@ else
 fi
 
 # 7) Create the Proton prefix by launching once (it fails Denuvo - expected -
-#    but that first run is what builds compatdata/<appid>/pfx).
-echo "[6/7] launching once to create the Proton prefix (first launch fails Denuvo - that's normal)..."
-( setsid steam "steam://rungameid/$APPID" >/dev/null 2>&1 & ) || \
-    ( setsid xdg-open "steam://rungameid/$APPID" >/dev/null 2>&1 & ) || true
+#    but that first run is what builds compatdata/<appid>/pfx). EA mode already
+#    did this inside `ea_tokeer setup`, so it is skipped here to avoid a double
+#    launch.
+if [ "$MODE" = "ea" ]; then
+    echo "[6/7] EA mode: prefix handled by ea setup"
+else
+    echo "[6/7] launching once to create the Proton prefix (first launch fails Denuvo - that's normal)..."
+    ( setsid steam "steam://rungameid/$APPID" >/dev/null 2>&1 & ) || \
+        ( setsid xdg-open "steam://rungameid/$APPID" >/dev/null 2>&1 & ) || true
+fi
 
 echo "[7/7] done."
 echo
 echo "Setup complete for app $APPID."
-if [ "$MODE" = "ubisoft" ]; then
+if [ "$MODE" = "ea" ]; then
+    echo "  1) Launch the game once so it writes a token_req, then:"
+    echo "       ~/.tokeer/tokeer ea-request $APPID"
+    echo "  2) Paste that token_req into your ticket."
+    echo "  3) When you get the Denuvo token back:"
+    echo "       ~/.tokeer/tokeer ea-apply $APPID @token.txt   (or paste the token inline)"
+    echo "  Check state any time:  ~/.tokeer/tokeer ea-verify $APPID"
+elif [ "$MODE" = "ubisoft" ]; then
     echo "  Verify your game (prints a code to paste in the ticket):"
     echo "    ~/.tokeer/tokeer verify-ubi $APPID"
     echo "  Then paste the care-package files into the game folder and send your"

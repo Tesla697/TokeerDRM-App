@@ -18,8 +18,25 @@ if [ $# -lt 1 ]; then
     echo "       tokeer <CODE> --no-launch   # write the ticket only"
     echo "       tokeer resign [APPID]       # re-sign the save if it won't load (no code needed)"
     echo "       tokeer lock <APPID>         # force the supported build of a version-locked game"
+    echo "       tokeer ea-verify <APPID>    # EA: check files, patch anadius64, print ticket code"
+    echo "       tokeer ea-request <APPID>   # EA: print the token_req to paste in the ticket"
+    echo "       tokeer ea-apply <APPID> <dbdata.json|@file>  # EA: drop in dbdata.json + launch"
     exit 1
 fi
+
+# EA (anadius folder flow) subcommands -> ea_tokeer_linux.py. EA games don't use
+# the native hook or the code system; the token comes from the ticket and lands
+# in dbdata.json, so this is its own small tool.
+case "$1" in
+    ea-setup|ea-request|ea-apply|ea-verify)
+        sub="${1#ea-}"; shift
+        if [ ! -f "$TDIR/ea_tokeer_linux.py" ]; then
+            echo "ERROR: EA tool missing from this bundle. Re-run install_linux.sh." >&2
+            exit 1
+        fi
+        exec python3 "$TDIR/ea_tokeer_linux.py" "$sub" "$@"
+        ;;
+esac
 
 # `tokeer lock <APPID>` -> write the version lock for a game whose newest Steam
 # build breaks activation, then tell the user to run Steam's "update" (which the
