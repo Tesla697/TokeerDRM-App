@@ -161,6 +161,21 @@ def anadius_patched(folder):
     return d[ISWINE_OFF:ISWINE_OFF + 4] == ISWINE_PATCH or b"Xine_get_version" in d
 
 
+def missing_extra_dlls(folder):
+    """Some cracks load extra DLLs (e.g. FC 26's EAAC.dll anti-cheat bypass) via
+    anadius_override.cfg's `LoadExtraDLLs`. Return any that aren't in the folder."""
+    cfg = os.path.join(folder, "anadius_override.cfg")
+    try:
+        txt = open(cfg, encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return []
+    m = re.search(r'"LoadExtraDLLs"\s*"([^"]+)"', txt)
+    if not m:
+        return []
+    names = [n.strip() for n in re.split(r'[,;\s]+', m.group(1)) if n.strip()]
+    return [n for n in names if not os.path.isfile(os.path.join(folder, n))]
+
+
 def find_token_req(folder):
     c = sorted(glob.glob(os.path.join(folder, "token_req*.txt")),
                key=os.path.getmtime, reverse=True)
@@ -228,6 +243,7 @@ def cmd_verify(appid):
     if not an: missing.append("anadius64.dll")
     if not db: missing.append("dbdata.dll")
     if not exe: missing.append("the Not-a-Crack game .exe")
+    missing += missing_extra_dlls(folder)  # e.g. EAAC.dll (anti-cheat bypass) for FC 26
 
     if missing:
         log("Not-a-Crack files are NOT in the game folder yet:")
