@@ -169,10 +169,16 @@ def find_token_req(folder):
 
 # --- Steam launch option ---------------------------------------------------
 
-def launch_command(exe):
+def launch_command(exe, folder):
     # swap the last arg of %command% (the exe Proton runs) for the crack exe.
-    return ("bash -c 'a=(\"$@\"); a[${#a[@]}-1]=\"%s\"; exec \"${a[@]}\"' -- %%command%%"
+    swap = ("bash -c 'a=(\"$@\"); a[${#a[@]}-1]=\"%s\"; exec \"${a[@]}\"' -- %%command%%"
             % exe)
+    # If the crack uses a version.dll proxy (FC-style loaders), Wine ships its own
+    # builtin version.dll and won't load the crack's copy unless we force it native.
+    # dbdata.dll/anadius64.dll aren't system names, so Wine loads those on its own.
+    if os.path.isfile(os.path.join(folder, "version.dll")):
+        return 'WINEDLLOVERRIDES="version=n,b" ' + swap
+    return swap
 
 
 def write_launch_option(appid, launch):
@@ -238,7 +244,7 @@ def cmd_verify(appid):
     log("Not-a-Crack files found. Preparing the game:")
     log("  [1/3] anadius64.dll: " + patch_anadius(folder))
 
-    launch = launch_command(exe)
+    launch = launch_command(exe, folder)
     if write_launch_option(appid, launch):
         log("  [2/3] Steam launch option set (Steam may restart)")
         lopt = True
