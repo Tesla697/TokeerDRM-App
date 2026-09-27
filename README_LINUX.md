@@ -86,6 +86,19 @@ tokeer <CODE> --server https://... # override backend (else ~/.tokeer/server_con
 Backend URL resolution: `--server` > `$TOKEER_DRM_SERVER` > `~/.tokeer/server_config.py`
 (the installer writes the last one for you).
 
+## Black screen on DirectX 12 games
+
+If the game activates and launches but you only get a **black screen** (sound may
+still play), that's the DirectX-to-Vulkan layer, not the activation. DX12 games
+render through VKD3D-Proton, and some Proton versions ship a build that breaks on
+certain GPUs (Proton 10-34 is a known bad one for this).
+
+Fix it by switching the game's Proton version: right-click the game in Steam ->
+Properties -> Compatibility -> pick a different version. **Proton GE** or
+**Proton-CachyOS** usually work, or just try an older stable Proton. Restart the
+game after changing it. The activation still holds, so you don't need to re-run
+`tokeer <CODE>`.
+
 ## If a game still errors after `tokeer <CODE>`
 
 The eticket write only matters if the native hook actually loads in the Proton
