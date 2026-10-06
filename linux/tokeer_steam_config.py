@@ -41,7 +41,8 @@ def steam_roots():
         "~/.steam/steam",
         "~/.local/share/Steam",
         "~/.steam/root",
-        "~/.var/app/com.valvesoftware.Steam/data/Steam",  # flatpak
+        "~/.var/app/com.valvesoftware.Steam/.local/share/Steam",  # flatpak
+        "~/.var/app/com.valvesoftware.Steam/data/Steam",  # older flatpak
     ]
     out = []
     for c in cands:

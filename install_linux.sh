@@ -128,7 +128,7 @@ if [ "$MODE" = "ea" ]; then
     echo "[4/7] EA mode: patching anadius64 + writing the crack-exe launch option..."
     # ea_tokeer setup patches anadius64.dll for Wine, finds the crack exe, writes
     # the Steam launch option that swaps %command%'s exe for it, and (step 7 below
-    # is skipped for ea) builds the prefix. Steam is already shut down here.
+    # is skipped for ea) builds the prefix. It closes Steam itself before writing.
     python3 "$TDIR/ea_tokeer_linux.py" setup "$APPID" || true
 elif [ "$MODE" = "ubisoft" ]; then
     echo "[4/7] Ubisoft mode: skipping Steam launch option (game runs folder-based under Proton)"

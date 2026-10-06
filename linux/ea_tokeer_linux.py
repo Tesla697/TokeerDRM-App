@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -196,14 +197,72 @@ def launch_command(exe, folder):
     return swap
 
 
+def steam_running():
+    try:
+        return subprocess.run(["pgrep", "-x", "steam"],
+                              stdout=subprocess.DEVNULL).returncode == 0
+    except OSError:
+        return False
+
+
+def stop_steam():
+    """Steam holds localconfig.vdf in memory and writes it back when it exits,
+    so a launch option written while it's open gets thrown away. Returns
+    (was_running, closed)."""
+    if not steam_running():
+        return False, True
+    log("  closing Steam so the launch option sticks...")
+    for cmd in (["steam", "-shutdown"],
+                ["flatpak", "run", "com.valvesoftware.Steam", "-shutdown"]):
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=20)
+            break
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    for _ in range(40):
+        if not steam_running():
+            time.sleep(2)  # let it finish flushing its own config first
+            return True, True
+        time.sleep(1)
+    return True, False
+
+
+def start_steam():
+    try:
+        subprocess.Popen(["steam"], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
 def write_launch_option(appid, launch):
     cfg = os.path.join(HERE, "tokeer_steam_config.py")
     if os.path.isfile(cfg):
         try:
             subprocess.run([sys.executable, cfg, appid, launch], check=True)
-            return True
         except subprocess.CalledProcessError:
             pass
+    return launch_option_set(appid, launch)
+
+
+def launch_option_set(appid, launch):
+    """Read it back from localconfig.vdf. tokeer_steam_config exits 0 even when
+    it only printed the manual fallback, so its exit code proves nothing."""
+    want = launch.replace("\\", "\\\\").replace('"', '\\"')
+    roots = {os.path.realpath(os.path.expanduser(c)) for c in (
+        "~/.steam/steam", "~/.local/share/Steam", "~/.steam/root",
+        "~/.var/app/com.valvesoftware.Steam/.local/share/Steam",
+        "~/.var/app/com.valvesoftware.Steam/data/Steam")}
+    for root in roots:
+        for lc in glob.glob(os.path.join(root, "userdata", "*", "config", "localconfig.vdf")):
+            try:
+                txt = open(lc, encoding="utf-8", errors="ignore").read()
+            except OSError:
+                continue
+            i = txt.find('"' + appid + '"')
+            if i >= 0 and want in txt[i:]:
+                return True
     return False
 
 
@@ -261,17 +320,27 @@ def cmd_verify(appid):
     log("  [1/3] anadius64.dll: " + patch_anadius(folder))
 
     launch = launch_command(exe, folder)
-    if write_launch_option(appid, launch):
-        log("  [2/3] Steam launch option set (Steam may restart)")
+    was_running = False
+    if launch_option_set(appid, launch):
+        log("  [2/3] Steam launch option already set")
         lopt = True
     else:
-        log("  [2/3] set this launch option on the game manually:")
-        log("        " + launch)
-        lopt = False
+        was_running, closed = stop_steam()
+        lopt = closed and write_launch_option(appid, launch)
+        if lopt:
+            log("  [2/3] Steam launch option set")
+        else:
+            if not closed:
+                log("  [2/3] Steam wouldn't close, so the launch option couldn't be saved.")
+            log("  [2/3] close Steam fully and run this again, or set this launch option")
+            log("        on the game by hand (Properties > Launch Options):")
+            log("        " + launch)
 
     if prefix_path(root, appid):
         log("  [3/3] Proton prefix already built")
         pfx = True
+        if was_running:
+            start_steam()
     else:
         log("  [3/3] building the Proton prefix (launch once; it fails Denuvo - normal)")
         launch_game(appid)
