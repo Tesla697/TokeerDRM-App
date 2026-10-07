@@ -243,8 +243,14 @@ def _library_roots(steam_root: str) -> list[str]:
 
 
 def find_prefix(steam_root: str, app_id: str) -> str:
+    # Steam keeps the prefix in the same library as the game. A stale prefix can be
+    # left on another drive (e.g. the game was moved), so check the game's own
+    # library first or the ticket lands in a prefix the game never reads.
+    roots = _library_roots(steam_root)
+    game_roots = [r for r in roots
+                  if os.path.isfile(os.path.join(r, "steamapps", f"appmanifest_{app_id}.acf"))]
     tried = []
-    for root in _library_roots(steam_root):
+    for root in game_roots + [r for r in roots if r not in game_roots]:
         pfx = os.path.join(root, "steamapps", "compatdata", app_id, "pfx")
         tried.append(pfx)
         if os.path.isdir(pfx):
@@ -341,6 +347,57 @@ def _hex_csv(h: str) -> str:
     stores in user.reg."""
     h = (h or "").strip().replace(" ", "").replace("\n", "").replace(",", "")
     return ",".join(h[i:i + 2].lower() for i in range(0, len(h), 2))
+
+
+def _wineserver_running(prefix: str) -> bool:
+    """True if a wineserver is serving this prefix. It holds the registry in memory
+    and saves it over user.reg when it exits, which would wipe the ticket."""
+    if not os.path.isdir("/proc"):
+        return False
+    compat = os.path.dirname(prefix.rstrip("/"))
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                if f.read().strip() != "wineserver":
+                    continue
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                env = f.read().split(b"\0")
+        except OSError:
+            continue
+        for kv in env:
+            k, _, v = kv.partition(b"=")
+            v = os.path.normpath(v.decode(errors="replace")) if v else ""
+            if (k == b"WINEPREFIX" and v == os.path.normpath(prefix)) or \
+               (k == b"STEAM_COMPAT_DATA_PATH" and v == os.path.normpath(compat)):
+                return True
+    return False
+
+
+def wait_for_prefix_idle(prefix: str, timeout: int = 30) -> None:
+    import time as _time
+    if not _wineserver_running(prefix):
+        return
+    log("  the game (or its wineserver) is still running on this prefix, waiting for it to exit ...")
+    end = _time.time() + timeout
+    while _time.time() < end:
+        _time.sleep(1)
+        if not _wineserver_running(prefix):
+            return
+    die("the game is still running. Close it completely, wait a few seconds, then run this again.")
+
+
+def prefix_has_ticket(prefix: str, app_id: str) -> bool:
+    import re
+    try:
+        with open(os.path.join(prefix, "user.reg"), encoding="utf-8", errors="surrogateescape") as f:
+            text = f.read()
+    except OSError:
+        return False
+    m = re.search(r"(?ms)^\[Software\\\\Valve\\\\Steam\\\\Apps\\\\" + re.escape(app_id)
+                  + r"\].*?(?=^\[|\Z)", text)
+    return bool(m and '"ETicket"=hex:' in m.group(0) and '"AppTicket"=hex:' in m.group(0))
 
 
 def write_prefix_registry_direct(prefix: str, app_id: str, appticket_hex: str,
@@ -696,6 +753,8 @@ def main() -> None:
     log("[2/4] locating Steam + Proton prefix ...")
     steam_root = find_steam_root(args.steam_root)
     prefix = find_prefix(steam_root, app_id)
+    if not args.dry_run:
+        wait_for_prefix_idle(prefix)
 
     log("[3/5] writing tickets into the game's Proton prefix ...")
     # Edit user.reg directly first - it needs no wine and can't hit the Proton
@@ -706,6 +765,8 @@ def main() -> None:
         wine = find_wine(steam_root, args.wine)
         reg_body = build_reg_file(app_id, appticket, eticket)
         write_prefix_registry(wine, prefix, reg_body, args.dry_run)
+    if not args.dry_run and not prefix_has_ticket(prefix, app_id):
+        die(f"the ticket didn't stick in {prefix}/user.reg. Close the game completely and run this again.")
 
     install_dir = find_install_dir(steam_root, app_id)
 
