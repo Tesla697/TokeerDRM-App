@@ -484,6 +484,12 @@ class Api:
                     os._exit(0)
                 threading.Thread(target=_q, daemon=True).start()
 
+            # The new build must unpack its OWN files. Inheriting our PyInstaller env
+            # makes it reuse this old build's _MEI folder (new code, old web/ + tools).
+            relaunch_env = {k: v for k, v in os.environ.items()
+                            if not k.startswith("_PYI") and k != "_MEIPASS2"}
+            relaunch_env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+
             # Preferred swap: RENAME in place. Windows lets you rename a *running* exe
             # (the process keeps its handle to the renamed-away file), so there's no
             # waiting and no AV-hostile "background cmd copying an .exe" — that copy
@@ -504,7 +510,8 @@ class Api:
                     raise
                 # DETACHED_PROCESS so the new app isn't tied to this dying one.
                 # --relaunched skips the single-instance guard during the handover.
-                subprocess.Popen([cur_exe, "--relaunched"], creationflags=0x00000008, close_fds=True)
+                subprocess.Popen([cur_exe, "--relaunched"], creationflags=0x00000008, close_fds=True,
+                                 env=relaunch_env)
                 _quit_soon()
                 return {"ok": True, "message": "Updating… TokeerDRM will restart automatically."}
             except OSError:
@@ -545,7 +552,8 @@ class Api:
             with open(bat, "w", encoding="ascii") as f:
                 f.write("\r\n".join(lines) + "\r\n")
             DETACHED = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
-            subprocess.Popen(["cmd", "/c", bat], creationflags=DETACHED, close_fds=True)
+            subprocess.Popen(["cmd", "/c", bat], creationflags=DETACHED, close_fds=True,
+                             env=relaunch_env)
             _quit_soon()
             return {"ok": True, "message": "Updating… TokeerDRM will restart automatically."}
         except Exception as e:
@@ -1128,6 +1136,29 @@ if __name__ == "__main__":
         finally:
             ost_setup.write_progress(100, "Done")
         sys.exit(0)
+
+    # Older self-updaters started the new build with their PyInstaller env, so it
+    # ran on the OLD build's unpacked files (old UI, tools that vanish once the old
+    # process exits). Spot that by the bundled app.js not knowing our version, and
+    # restart once with a clean env so this build unpacks its own files.
+    if getattr(sys, "frozen", False) and not os.environ.get("TOKEERDRM_CLEAN_START"):
+        try:
+            with open(resource_path(os.path.join("web", "app.js")), encoding="utf-8") as _f:
+                _stale = f'"{APP_VERSION}": [' not in _f.read()
+        except Exception:
+            _stale = False
+        if _stale:
+            _env = {k: v for k, v in os.environ.items()
+                    if not k.startswith("_PYI") and k != "_MEIPASS2"}
+            _env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+            _env["TOKEERDRM_CLEAN_START"] = "1"
+            _args = [a for a in sys.argv[1:] if a != "--relaunched"] + ["--relaunched"]
+            try:
+                subprocess.Popen([sys.executable] + _args, creationflags=0x00000008,
+                                 close_fds=True, env=_env)
+                os._exit(0)
+            except Exception:
+                pass
 
     # Deep-link / single-instance handling for the one-click "Redeem in App" flow.
     # `--relaunched` is set by the self-updater when it starts the new build: during
