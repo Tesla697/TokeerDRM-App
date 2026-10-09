@@ -29,6 +29,7 @@ const CHECK_SVG = `<svg class="check" viewBox="0 0 24 24"><circle cx="12" cy="12
 function setResult(el, kind, html) {
   el.className = `result ${kind}`;
   el.innerHTML = (kind === "ok" ? CHECK_SVG : "") + `<span>${html}</span>`;
+  if (kind === "ok") requestAnimationFrame(() => burstFrom(el, 14));
 }
 function clearResult(el) { el.className = "result"; el.innerHTML = ""; }
 
@@ -44,10 +45,16 @@ function initTabs() {
   const move = (tab) => { glider.style.left = `${tab.offsetLeft}px`; glider.style.width = `${tab.offsetWidth}px`; };
   tabs.forEach((tab) => {
     tab.addEventListener("click", () => {
+      const was = $(".tab.active");
       tabs.forEach((t) => t.classList.remove("active"));
       tab.classList.add("active");
       const name = tab.dataset.tab;
+      if (was !== tab) {
+        glider.classList.add("moving");
+        setTimeout(() => glider.classList.remove("moving"), 260);
+      }
       move(tab);
+      document.body.dataset.tab = name;
       $$(".panel").forEach((p) => p.classList.toggle("show", p.dataset.panel === name));
     });
   });
@@ -134,12 +141,12 @@ async function maybeOfferCloud(out) {
   const res = await showCloudGate();
   if (res.proceed) return true;          // enabled with no restart → go straight to redeem
   if (res.reason === "declined") {
-    setResult(out, "err", "Cloud saves are required — enable them to apply your code.");
+    setResult(out, "err", "Cloud saves are required. Enable them to apply your code.");
     toast("Enable cloud saves to continue", "err");
   } else if (res.reason === "enabled") {
     // Steam is restarting — the engine check would fail right now, so make the user
     // click apply again once it's back rather than burning the code on a dead engine.
-    setResult(out, "ok", res.message || "Cloud saves enabled — apply your code once Steam is back.");
+    setResult(out, "ok", res.message || "Cloud saves enabled. Apply your code once Steam is back.");
     toast("Cloud saves enabled", "ok");
   }
   return false;
@@ -255,7 +262,7 @@ function initGenerate() {
       if (r.ok) {
         reveal.innerHTML = `
           <div class="code-card">
-            <span class="code-val">${r.code}</span>
+            <span class="code-val">${[...r.code].map((c, i) => `<span style="--i:${i}">${c}</span>`).join("")}</span>
             <button class="copy-btn" id="copyBtn">
               <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
               Copy
@@ -265,11 +272,15 @@ function initGenerate() {
         const copyBtn = $("#copyBtn");
         copyBtn.addEventListener("click", async () => {
           try { await navigator.clipboard.writeText(r.code); } catch {}
-          copyBtn.innerHTML = "✓ Copied"; setTimeout(() => {
+          copyBtn.classList.add("done");
+          copyBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg> Copied`;
+          setTimeout(() => {
+            copyBtn.classList.remove("done");
             copyBtn.innerHTML = `<svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg> Copy`;
           }, 1400);
         });
         toast("Code generated", "ok");
+        requestAnimationFrame(() => burstFrom(reveal.firstElementChild, 18));
       } else {
         setResult(out, "err", r.error || "Couldn't generate a code.");
         toast(r.error && /own/i.test(r.error) ? "You don't own this game" : "Generate failed", "err");
@@ -292,7 +303,7 @@ function setRedeemEnabled(on) {
   const btn = $("#applyBtn");
   if (!btn) return;
   btn.disabled = !on;
-  btn.title = on ? "" : "Set up OpenSteamTool first — Denuvo codes can't apply without it.";
+  btn.title = on ? "" : "Set up OpenSteamTool first. Denuvo codes can't apply without it.";
 }
 
 // Reflect status in the Engine tab (dot, label, button text/enabled).
@@ -301,10 +312,14 @@ function updateEnginePanel(s) {
   const inst = $("#ostInstallBtn"), uninst = $("#ostUninstallBtn");
   if (!dot) return;
   const installed = !!(s && s.installed), ready = !!(s && s.ready);
-  dot.className = "es-dot " + (ready ? "ok" : installed ? "warn" : "off");
+  const state = ready ? "ok" : installed ? "warn" : "off";
+  dot.className = "es-dot " + state;
   txt.textContent = ready ? `Active${s && s.engine ? " · " + s.engine : ""}`
-                  : installed ? "Installed — needs setup"
+                  : installed ? "Installed, needs setup"
                   : "Not installed";
+  const sbDot = $("#sbEngineDot"), sbTxt = $("#sbEngineText");
+  if (sbDot) sbDot.className = "es-dot " + state;
+  if (sbTxt) sbTxt.textContent = ready ? "Active" : installed ? "Needs setup" : "Not installed";
   if (inst) inst.querySelector(".btn-label").textContent =
     ready ? "Reinstall / Repair" : installed ? "Finish setup" : "Install OpenSteamTool";
   if (uninst) uninst.disabled = !installed;
@@ -324,7 +339,7 @@ async function refreshEngine() {
       window.__engineAutoRan = true;
       showEngineBanner(action === "update"
         ? "Updating OpenSteamTool to the latest version…"
-        : "OpenSteamTool needs repair — approve the Windows prompt…");
+        : "OpenSteamTool needs repair. Approve the Windows prompt…");
       await runEngineAction(action === "update" ? "update_engine" : "install_engine",
         $("#engineBtn"), action === "update" ? "OpenSteamTool updated" : "OpenSteamTool repaired");
       return;  // runEngineAction schedules a follow-up refreshEngine
@@ -389,7 +404,7 @@ async function runEngineAction(method, btn, okMsg) {
 function handleDefenderBlock(r) {
   const msg = (r && r.message) || "Windows Defender blocked OpenSteamTool. Install it via LuaTools.";
   const url = (r && r.url) || "https://lua.tools";
-  toast("Defender blocked OST — use LuaTools", "err");
+  toast("Defender blocked OST, use LuaTools", "err");
   if ($("#ostResult")) setResult($("#ostResult"), "err", msg);
   showEngineBanner(msg);
   // Turn the banner button into "Open LuaTools". Clone it first to drop the old
@@ -412,9 +427,20 @@ function initEngine() {
   // Engine tab buttons
   const ibtn = $("#ostInstallBtn"), ubtn = $("#ostUninstallBtn");
   if (ibtn) ibtn.addEventListener("click", () => runEngineAction("install_engine", ibtn, "OpenSteamTool ready"));
-  if (ubtn) ubtn.addEventListener("click", () => {
-    if (!confirm("Remove OpenSteamTool? Your game library (luas) stays; your previous setup is restored if there was one.")) return;
+  if (ubtn) ubtn.addEventListener("click", async () => {
+    if (!(await showConfirm())) return;
     runEngineAction("uninstall_engine", ubtn, "OpenSteamTool removed");
+  });
+}
+
+// In-app yes/no sheet for uninstall (native confirm() shows the local address in its title).
+function showConfirm() {
+  return new Promise((resolve) => {
+    const gate = $("#confirmGate"), ok = $("#cfOkBtn"), no = $("#cfCancelBtn");
+    const close = (v) => { gate.hidden = true; ok.onclick = null; no.onclick = null; resolve(v); };
+    ok.onclick = () => close(true);
+    no.onclick = () => close(false);
+    gate.hidden = false;
   });
 }
 
@@ -465,7 +491,7 @@ function initDllFix() {
       if (r && r.defender) {
         handleDefenderBlock(r);
       } else if (r && r.ok) {
-        toast("Enhanced DLL installed — Steam is restarting", "ok");
+        toast("Enhanced DLL installed, Steam is restarting", "ok");
         hideDllBanner();
       } else {
         toast((r && r.message) || "Fix failed", "err");
@@ -495,6 +521,13 @@ function setUpdateProgress(p, m) {
 // matching notes once, then remembers the version so it never nags again. Add a
 // new entry here every release.
 const PATCH_NOTES = {
+  "1.0.30": [
+    "Brand new look: frosted glass, bright colors that change with each tab, and a dock at the bottom for Activate, Generate and Engine.",
+    "Server status and the app version now sit in the pill at the top. Hover it to see the engine status.",
+    "Buttons and code boxes react when you touch them, and you can pop the bubbles floating in the background.",
+    "A little Halloween surprise is hiding in there for October.",
+    "Uninstalling OpenSteamTool now asks inside the app instead of a Windows popup. Everything else works exactly like before.",
+  ],
   "1.0.29": [
     "Save carry-over no longer opens and closes the game. Your save is moved to the new activation first (you'll see a command prompt for a couple of minutes), then the game opens once with your progress.",
     "If the game is already open when you redeem, the app closes it for you, or asks you to close it if it can't.",
@@ -546,7 +579,7 @@ async function checkUpdate() {
     if (v && v.update_required) {
       window.__updProgress = setUpdateProgress;
       $("#ugText").textContent =
-        `Version ${v.latest} is out — you're on ${v.current}. Update to keep using TokeerDRM.`;
+        `Version ${v.latest} is out and you're on ${v.current}. Update to keep using TokeerDRM.`;
       // In-app: download + swap + relaunch, no browser needed.
       const upd = $("#ugUpdateBtn");
       if (upd) upd.onclick = async () => {
@@ -619,7 +652,7 @@ async function startAutoRedeem(code) {
     gotoActivateTab();
     const clean = fillCodeBoxes(code);
     if (clean.length !== 6) { toast("That link had a bad code.", "err"); return; }
-    toast("Code received — applying…", "ok");
+    toast("Code received, applying…", "ok");
 
     // Up to 4 passes; each may auto-run one fix (engine/DLL/cloud) then retry.
     for (let attempt = 0; attempt < 4; attempt++) {
@@ -630,7 +663,7 @@ async function startAutoRedeem(code) {
 
       if (r && r.ok) {
         setResult(out, "ok", `Ticket applied for app ${r.app_id}. Launching the game…`);
-        toast("Applied — launching game", "ok");
+        toast("Applied, launching game", "ok");
         clearCode();
         try { await call("run_game", r.app_id); } catch {}
         break;
@@ -638,13 +671,13 @@ async function startAutoRedeem(code) {
 
       // Auto-fix branches — run the fix, wait for Steam/engine to settle, then retry.
       if (r && r.engine_fix) {
-        showEngineBanner(r.error || "Setting up OpenSteamTool — approve the Windows prompt…");
+        showEngineBanner(r.error || "Setting up OpenSteamTool. Approve the Windows prompt…");
         await runEngineAction("install_engine", $("#engineBtn") || $("#ostInstallBtn"), "OpenSteamTool ready");
         await waitForEngineReady();
         continue;
       }
       if (r && r.dll_fix) {
-        showDllBanner(r.error || "Installing the enhanced DLL — Steam will restart…");
+        showDllBanner(r.error || "Installing the enhanced DLL. Steam will restart…");
         const b = $("#dllFixBtn"); if (b) b.click();
         await new Promise((res) => setTimeout(res, 4000));  // let the swap + Steam restart begin
         await waitForEngineReady();
@@ -664,6 +697,129 @@ async function startAutoRedeem(code) {
     __autoRedeemRunning = false;
   }
 }
+
+// ── fx: bubbles, cursor glow, glass highlight, ripples ─────────────────────────
+function burstAt(x, y, n = 10, spread = 90) {
+  for (let k = 0; k < n; k++) {
+    const b = document.createElement("span");
+    const size = 6 + Math.random() * 16;
+    const a = Math.random() * Math.PI * 2, d = spread * (0.4 + Math.random() * 0.8);
+    b.className = "fx-bub";
+    b.style.cssText = `left:${x - size / 2}px;top:${y - size / 2}px;width:${size}px;height:${size}px;` +
+      `--dx:${Math.cos(a) * d}px;--dy:${Math.sin(a) * d - 30}px;--t:${0.6 + Math.random() * 0.6}s`;
+    document.body.appendChild(b);
+    setTimeout(() => b.remove(), 1300);
+  }
+}
+function burstFrom(el, n) {
+  if (!el) return;
+  const r = el.getBoundingClientRect();
+  burstAt(r.left + r.width / 2, r.top + r.height / 2, n, Math.max(80, r.width / 2));
+}
+
+// halloween bits show up for all of October and the first days of November
+const SPOOKY = (() => { const d = new Date(); return d.getMonth() === 9 || (d.getMonth() === 10 && d.getDate() <= 2); })();
+const GHOST_SVG = `<svg viewBox="0 0 40 44"><path class="g-body" d="M20 2C10.6 2 4 9.2 4 18.5V42l5.3-4.2 5.4 4.2 5.3-4.2 5.3 4.2 5.4-4.2L36 42V18.5C36 9.2 29.4 2 20 2Z"/><ellipse class="g-eye" cx="14.5" cy="18" rx="2.6" ry="3.6"/><ellipse class="g-eye" cx="25.5" cy="18" rx="2.6" ry="3.6"/><ellipse class="g-eye" cx="20" cy="27" rx="2.4" ry="3"/></svg>`;
+const BAT_SVG = `<svg viewBox="0 0 64 28"><path class="wl" d="M28 12C24 6 17 3 9 4c3 2 4 5 3 8-3-2-8-2-12 0 4 2 7 6 7 10 4-3 9-3 13-1-1-4 2-7 8-9Z"/><path class="wr" d="M36 12c4-6 11-9 19-8-3 2-4 5-3 8 3-2 8-2 12 0-4 2-7 6-7 10-4-3-9-3-13-1 1-4-2-7-8-9Z"/><path d="M32 8c-2 0-3-3-3-5l2 2h2l2-2c0 2-1 5-3 5Zm-4 4c0-3 2-4 4-4s4 1 4 4c0 5-2 9-4 9s-4-4-4-9Z"/></svg>`;
+
+function spawnBat() {
+  const box = $("#bats");
+  if (!box) return;
+  const bat = document.createElement("span");
+  bat.className = "bat";
+  bat.style.cssText = `--y:${6 + Math.random() * 30}vh;--s:${34 + Math.random() * 34}px;` +
+    `--d:${8 + Math.random() * 6}s;--dy:${(Math.random() - 0.5) * 120}px`;
+  bat.innerHTML = BAT_SVG;
+  box.appendChild(bat);
+  bat.addEventListener("animationend", (e) => { if (e.animationName === "bat-fly") bat.remove(); });
+  setTimeout(spawnBat, 5000 + Math.random() * 7000);
+}
+
+function initSpooky() {
+  if (!SPOOKY) return;
+  document.body.classList.add("spooky");
+  setTimeout(spawnBat, 1500);
+  const spider = $("#spider");
+  if (spider) spider.addEventListener("pointerenter", () => {
+    if (spider.classList.contains("climb")) return;
+    spider.classList.add("climb");
+    setTimeout(() => spider.classList.remove("climb"), 3500);
+  });
+}
+
+function spawnBubble(box, first) {
+  const b = document.createElement("span");
+  const ghost = SPOOKY && Math.random() < 0.3;
+  const size = ghost ? 26 + Math.random() * 30 : 18 + Math.random() * 64;
+  const dur = 14 + Math.random() * 16;
+  b.className = ghost ? "bubble ghost" : "bubble";
+  if (ghost) b.innerHTML = GHOST_SVG;
+  b.style.cssText = `width:${size}px;height:${size}px;left:${Math.random() * 100}%;` +
+    `--dur:${dur}s;--delay:${first ? -Math.random() * dur : 0}s;opacity:${0.5 + Math.random() * 0.5}`;
+  b.addEventListener("pointerenter", () => {
+    if (b.classList.contains("pop")) return;
+    const r = b.getBoundingClientRect();
+    const cs = getComputedStyle(b);
+    b.style.translate = cs.translate; b.style.marginLeft = cs.marginLeft;
+    b.classList.add("pop");
+    burstAt(r.left + r.width / 2, r.top + r.height / 2, 6, size);
+    setTimeout(() => { b.remove(); spawnBubble(box, false); }, 340);
+  });
+  b.addEventListener("animationiteration", (e) => {
+    if (e.animationName === "rise") b.style.left = `${Math.random() * 100}%`;
+  });
+  box.appendChild(b);
+}
+
+function initFx() {
+  initSpooky();
+  const box = $("#bubbles");
+  if (box) for (let i = 0; i < 14; i++) spawnBubble(box, true);
+
+  // the glow trails the cursor like it's floating in water
+  const glow = $("#cursorGlow");
+  let tx = innerWidth / 2, ty = innerHeight * 0.4, gx = tx, gy = ty;
+  document.addEventListener("pointermove", (e) => {
+    tx = e.clientX; ty = e.clientY;
+    const t = e.target.closest && e.target.closest(".glass, .btn");
+    if (t) {
+      const r = t.getBoundingClientRect();
+      t.style.setProperty("--mx", `${e.clientX - r.left}px`);
+      t.style.setProperty("--my", `${e.clientY - r.top}px`);
+    }
+  });
+  if (glow) {
+    const step = () => {
+      gx += (tx - gx) * 0.07; gy += (ty - gy) * 0.07;
+      glow.style.transform = `translate(${gx}px, ${gy}px)`;
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
+  // ripple + a few bubbles on every press
+  document.addEventListener("pointerdown", (e) => {
+    const t = e.target.closest && e.target.closest(".btn, .tab, .copy-btn");
+    if (!t || t.disabled) return;
+    const r = t.getBoundingClientRect();
+    const rp = document.createElement("span");
+    rp.className = "ripple";
+    rp.style.left = `${e.clientX - r.left}px`;
+    rp.style.top = `${e.clientY - r.top}px`;
+    t.appendChild(rp);
+    setTimeout(() => rp.remove(), 750);
+    burstAt(e.clientX, e.clientY, 7, 60);
+  });
+
+  // wobble once when the pointer lands on a button
+  document.addEventListener("pointerover", (e) => {
+    const t = e.target.closest && e.target.closest(".btn");
+    if (!t || t.disabled || t.contains(e.relatedTarget)) return;
+    t.classList.remove("wobble"); void t.offsetWidth; t.classList.add("wobble");
+    setTimeout(() => t.classList.remove("wobble"), 720);
+  });
+}
+initFx();
 
 // ── boot ────────────────────────────────────────────────────────────────────────
 whenReady(() => {

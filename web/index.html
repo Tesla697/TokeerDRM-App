@@ -6,37 +6,63 @@
   <link rel="icon" href="app_icon.ico" />
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
-  <!-- animated aurora background -->
-  <div class="aurora">
+<body data-tab="activate">
+
+  <!-- living wallpaper -->
+  <div class="wallpaper" aria-hidden="true">
     <span class="blob b1"></span>
     <span class="blob b2"></span>
     <span class="blob b3"></span>
-    <div class="grid-overlay"></div>
+    <span class="blob b4"></span>
+    <span class="blob b5"></span>
+    <span class="cursor-glow" id="cursorGlow"></span>
+
+    <!-- halloween layer, only shown in spooky season -->
+    <div class="spooky-only moon"></div>
+    <div class="spooky-only bats" id="bats"></div>
+    <svg class="spooky-only web" viewBox="0 0 170 170"><path d="M0 0L170.0 0.0 M0 0L164.2 44.0 M0 0L144.2 90.1 M0 0L109.3 130.2 M0 0L63.7 157.6 M0 0L0.0 170.0 M28.0 0.0Q22.6 3.0 27.0 7.2Q20.8 9.1 23.7 14.8Q17.1 14.9 18.0 21.4Q11.7 19.4 10.5 26.0Q4.3 22.1 0.0 28.0 M52.0 0.0Q41.9 5.5 50.2 13.5Q38.7 16.8 44.1 27.6Q31.8 27.6 33.4 39.8Q21.7 36.1 19.5 48.2Q8.0 41.1 0.0 52.0 M78.0 0.0Q62.9 8.3 75.3 20.2Q58.0 25.2 66.1 41.3Q47.7 41.4 50.1 59.8Q32.5 54.1 29.2 72.3Q12.0 61.6 0.0 78.0 M104.0 0.0Q83.8 11.0 100.5 26.9Q77.3 33.6 88.2 55.1Q63.6 55.3 66.8 79.7Q43.4 72.2 39.0 96.4Q16.0 82.2 0.0 104.0 M132.0 0.0Q106.4 14.0 127.5 34.2Q98.2 42.7 111.9 69.9Q80.7 70.1 84.8 101.1Q55.1 91.6 49.4 122.4Q20.3 104.3 0.0 132.0 M160.0 0.0Q129.0 17.0 154.5 41.4Q119.0 51.7 135.7 84.8Q97.8 85.0 102.8 122.6Q66.7 111.1 59.9 148.3Q24.6 126.4 0.0 160.0"/></svg>
+    <div class="spooky-only spider" id="spider">
+      <span class="thread"></span>
+      <svg viewBox="0 0 40 36">
+        <g class="legs"><path d="M14 16 6 9 2 12M14 18 4 16 1 20M15 20 6 24 3 30M16 22 10 29 9 35M26 16l8-7 4 3M26 18l10-2 3 4M25 20l9 4 3 6M24 22l6 7 1 6"/></g>
+        <ellipse class="body" cx="20" cy="22" rx="7" ry="8"/>
+        <circle class="body" cx="20" cy="13" r="4.5"/>
+        <circle class="eye" cx="18.3" cy="12.6" r="1.1"/><circle class="eye" cx="21.7" cy="12.6" r="1.1"/>
+      </svg>
+    </div>
+    <div class="spooky-only fog"></div>
+    <div class="spooky-only fog f2"></div>
+
+    <div class="bubbles" id="bubbles"></div>
   </div>
 
-  <main class="shell">
-    <div class="card" id="card">
+  <!-- dynamic island: status, version, engine -->
+  <div class="island" id="island">
+    <div class="island-main">
+      <div class="status-pill" id="statusPill" title="Server status">
+        <span class="dot"></span>
+        <span class="status-text" id="statusText">connecting…</span>
+      </div>
+      <span class="island-sep"></span>
+      <svg class="spooky-only pumpkin" viewBox="0 0 24 24"><path class="pk-stem" d="M12 6c0-2 1-3 3-3.5"/><path class="pk-body" d="M12 6c-2.5-1.3-5.5-.5-6.5 1.2C3.4 8.4 2.5 11 3 14c.6 3.8 3.6 6 6 5.6.9.5 2 .7 3 .7s2.1-.2 3-.7c2.4.4 5.4-1.8 6-5.6.5-3-.4-5.6-2.5-6.8C17.5 5.5 14.5 4.7 12 6Z"/><path class="pk-face" d="M8 11.5l1.6-1.8 1.4 1.8Zm5 0 1.4-1.8 1.6 1.8Zm-4.5 3.2c1 1.6 6 1.6 7 0l-1.4.5-1-.8-1 .8-1-.8-1 .8Z"/></svg>
+      <span class="island-brand">TokeerDRM</span>
+      <span id="appVersion" class="app-version" title="App version"></span>
+    </div>
+    <div class="island-more">
+      <div class="island-more-inner">
+        <div class="isl-row"><span>Engine</span><span class="sys-val"><span class="es-dot" id="sbEngineDot"></span><span id="sbEngineText">checking…</span></span></div>
+        <div class="isl-row faint"><span>Self-hosted · no launcher · no nonsense</span></div>
+      </div>
+    </div>
+  </div>
 
-      <!-- header -->
-      <header class="head">
-        <div class="brand">
-          <div class="logo"><span>T</span></div>
-          <div class="brand-text">
-            <h1>TokeerDRM</h1>
-            <p>Activation tickets, the easy way</p>
-          </div>
-        </div>
-        <div class="status-pill" id="statusPill" title="Server status">
-          <span class="dot"></span>
-          <span class="status-text" id="statusText">connecting…</span>
-        </div>
-      </header>
+  <main class="stage">
+    <div class="card glass" id="card">
 
       <!-- dll-fix banner: shown when original (unmodified) OpenSteamTool.dll is detected -->
-      <div class="engine-banner" id="dllBanner" hidden>
+      <div class="engine-banner glass-lite" id="dllBanner" hidden>
         <div class="eb-row">
-          <span class="eb-icon">⚡</span>
+          <span class="eb-icon tile-sunset"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z"/></svg></span>
           <div class="eb-text">
             <strong>Enhanced DLL needed</strong>
             <span id="dllBannerMsg">Some games throw errors with the original OpenSteamTool. Install the enhanced version for full compatibility.</span>
@@ -53,12 +79,12 @@
       </div>
 
       <!-- engine setup banner (shown only when OpenSteamTool isn't active) -->
-      <div class="engine-banner" id="engineBanner" hidden>
+      <div class="engine-banner glass-lite" id="engineBanner" hidden>
         <div class="eb-row">
-          <span class="eb-icon">⚙</span>
+          <span class="eb-icon tile-ocean"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M4.9 4.9 7 7m10 10 2.1 2.1M2 12h3m14 0h3M4.9 19.1 7 17M17 7l2.1-2.1"/></svg></span>
           <div class="eb-text">
             <strong>One-time setup: OpenSteamTool</strong>
-            <span id="engineBannerMsg">Denuvo codes need OpenSteamTool active in Steam. Install it once — your games stay put.</span>
+            <span id="engineBannerMsg">Denuvo codes need OpenSteamTool active in Steam. Install it once, your games stay put.</span>
           </div>
           <button class="btn small" id="engineBtn">
             <span class="btn-label">Set it up</span>
@@ -71,30 +97,17 @@
         </div>
       </div>
 
-      <!-- tab switcher -->
-      <nav class="tabs" id="tabs">
-        <button class="tab active" data-tab="activate">
-          <svg viewBox="0 0 24 24"><path d="M7 14a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm3-1 8-8m-3 0h3v3"/></svg>
-          Activate
-        </button>
-        <button class="tab" data-tab="generate">
-          <svg viewBox="0 0 24 24"><path d="M12 3v6m0 0 3-3m-3 3L9 6m-4 9a7 7 0 1 0 14 0"/></svg>
-          Generate
-        </button>
-        <button class="tab" data-tab="engine">
-          <svg viewBox="0 0 24 24"><path d="M4 21v-6M4 11V3M12 21v-9M12 8V3M20 21v-4M20 13V3M1 15h6M9 8h6M17 17h6"/></svg>
-          Engine
-        </button>
-        <span class="tab-glider" id="glider"></span>
-      </nav>
-
-      <!-- panels -->
       <section class="panels">
 
         <!-- ACTIVATE -->
         <div class="panel show" data-panel="activate">
-          <h2 class="panel-title">Redeem a code</h2>
-          <p class="panel-sub">Paste the 6-character code you received. We'll apply the ticket so you can launch the game from Steam.</p>
+          <div class="panel-head">
+            <span class="hero-tile"><svg viewBox="0 0 24 24"><path d="M7 14a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm3-1 8-8m-3 0h3v3"/></svg></span>
+            <div>
+              <h2 class="panel-title">Redeem a code</h2>
+              <p class="panel-sub">Paste the 6-character code you received. We'll apply the ticket so you can launch the game from Steam.</p>
+            </div>
+          </div>
 
           <div class="code-boxes" id="codeBoxes">
             <input class="cbox" maxlength="1" inputmode="text" autocomplete="off" />
@@ -115,8 +128,13 @@
 
         <!-- GENERATE -->
         <div class="panel" data-panel="generate">
-          <h2 class="panel-title">Generate a code to share</h2>
-          <p class="panel-sub">Enter a game's Steam AppID. If your signed-in account owns it, you'll get a shareable code — no install or launch needed.</p>
+          <div class="panel-head">
+            <span class="hero-tile"><svg viewBox="0 0 24 24"><path d="M12 3v6m0 0 3-3m-3 3L9 6m-4 9a7 7 0 1 0 14 0"/></svg></span>
+            <div>
+              <h2 class="panel-title">Generate a code to share</h2>
+              <p class="panel-sub">Enter a game's Steam AppID. If your signed-in account owns it, you'll get a shareable code. No install or launch needed.</p>
+            </div>
+          </div>
 
           <div class="fields">
             <label class="field">
@@ -125,7 +143,7 @@
               <span class="game-name" id="gameName"></span>
             </label>
           </div>
-          <p class="hint">Each code is <strong>single-use</strong> and expires in <strong>30 minutes</strong> — generate it right before the recipient launches the game.</p>
+          <p class="hint">Each code is <strong>single-use</strong> and expires in <strong>30 minutes</strong>. Generate it right before the recipient launches the game.</p>
 
           <button class="btn primary block" id="genBtn">
             <span class="btn-label">Generate code</span>
@@ -138,12 +156,20 @@
 
         <!-- ENGINE (OpenSteamTool) -->
         <div class="panel" data-panel="engine">
-          <h2 class="panel-title">OpenSteamTool engine</h2>
-          <p class="panel-sub">Denuvo codes need OpenSteamTool active in Steam. Install, repair, or remove it here — your game library is preserved either way.</p>
+          <div class="panel-head">
+            <span class="hero-tile"><svg viewBox="0 0 24 24"><path d="M4 21v-6M4 11V3M12 21v-9M12 8V3M20 21v-4M20 13V3M1 15h6M9 8h6M17 17h6"/></svg></span>
+            <div>
+              <h2 class="panel-title">OpenSteamTool engine</h2>
+              <p class="panel-sub">Denuvo codes need OpenSteamTool active in Steam. Install, repair, or remove it here. Your game library is preserved either way.</p>
+            </div>
+          </div>
 
-          <div class="engine-state" id="engineState">
-            <span class="es-dot" id="esDot"></span>
-            <span id="esText">checking…</span>
+          <div class="engine-state glass-lite" id="engineState">
+            <span class="es-label">Status</span>
+            <span class="es-value">
+              <span class="es-dot" id="esDot"></span>
+              <span id="esText">checking…</span>
+            </span>
           </div>
 
           <div class="engine-actions">
@@ -165,18 +191,30 @@
         </div>
 
       </section>
-
-      <footer class="foot">
-        <span>Self-hosted · no launcher · no nonsense</span>
-        <span id="appVersion" class="app-version" title="App version"></span>
-      </footer>
     </div>
   </main>
 
+  <!-- dock -->
+  <nav class="tabs dock" id="tabs">
+    <span class="tab-glider" id="glider"></span>
+    <button class="tab active" data-tab="activate">
+      <svg viewBox="0 0 24 24"><path d="M7 14a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm3-1 8-8m-3 0h3v3"/></svg>
+      <span>Activate</span>
+    </button>
+    <button class="tab" data-tab="generate">
+      <svg viewBox="0 0 24 24"><path d="M12 3v6m0 0 3-3m-3 3L9 6m-4 9a7 7 0 1 0 14 0"/></svg>
+      <span>Generate</span>
+    </button>
+    <button class="tab" data-tab="engine">
+      <svg viewBox="0 0 24 24"><path d="M4 21v-6M4 11V3M12 21v-9M12 8V3M20 21v-4M20 13V3M1 15h6M9 8h6M17 17h6"/></svg>
+      <span>Engine</span>
+    </button>
+  </nav>
+
   <!-- force-update gate (blocks everything when outdated) -->
   <div class="update-gate" id="updateGate" hidden>
-    <div class="ug-card">
-      <div class="ug-icon">⬆</div>
+    <div class="ug-card glass">
+      <div class="ug-icon tile-ocean"><svg viewBox="0 0 24 24"><path d="M12 19V5m0 0-6 6m6-6 6 6"/></svg></div>
       <h2>Update required</h2>
       <p id="ugText">A newer version of TokeerDRM is available. Please update to continue.</p>
       <button class="btn primary" id="ugUpdateBtn"><span class="btn-label">Update now</span></button>
@@ -184,18 +222,18 @@
         <div class="eb-track"><div class="eb-bar" id="ugBar"></div></div>
         <span class="eb-pct" id="ugPct">0%</span>
       </div>
-      <button class="btn small" id="ugBtn"><span class="btn-label">Download from GitHub instead</span></button>
+      <button class="btn secondary" id="ugBtn"><span class="btn-label">Download from GitHub instead</span></button>
     </div>
   </div>
 
   <!-- cloud-saves gate: shown before applying a code when cloud saves are off -->
   <div class="update-gate" id="cloudGate" hidden>
-    <div class="ug-card">
-      <div class="ug-icon">☁</div>
+    <div class="ug-card glass">
+      <div class="ug-icon tile-sky"><svg viewBox="0 0 24 24"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 8.5a4.75 4.75 0 0 1-.75 9.5H7Z"/></svg></div>
       <h2>Enable cloud saves</h2>
       <p>
         Steam won't sync saves for unlocked games, so your progress can be lost.
-        This stores your saves through CloudRedirect — no sign-in needed. Enabling it
+        This stores your saves through CloudRedirect, no sign-in needed. Enabling it
         restarts Steam, then you can apply your code.
       </p>
       <div class="eb-progress" id="cloudProgress" hidden>
@@ -206,8 +244,8 @@
         <span class="btn-label">Enable cloud saves</span>
         <span class="spinner"></span>
       </button>
-      <button class="btn small" id="cloudCancelBtn">
-        <span class="btn-label">Not now — don't apply the code</span>
+      <button class="btn secondary" id="cloudCancelBtn">
+        <span class="btn-label">Not now, don't apply the code</span>
       </button>
       <p class="ug-note" id="cloudNote" hidden></p>
     </div>
@@ -215,11 +253,22 @@
 
   <!-- patch notes: shown once after the app updates to a new version -->
   <div class="update-gate" id="patchNotesGate" hidden>
-    <div class="ug-card">
-      <div class="ug-icon">🎉</div>
+    <div class="ug-card glass">
+      <div class="ug-icon tile-candy"><svg viewBox="0 0 24 24"><path d="M12 3l2.4 5.6L20 9.3l-4.3 3.9 1.2 5.8L12 16.1 7.1 19l1.2-5.8L4 9.3l5.6-.7L12 3Z"/></svg></div>
       <h2 id="pnTitle">What's new</h2>
       <ul class="pn-list" id="pnList"></ul>
       <button class="btn primary" id="pnCloseBtn"><span class="btn-label">Got it</span></button>
+    </div>
+  </div>
+
+  <!-- uninstall confirm -->
+  <div class="update-gate" id="confirmGate" hidden>
+    <div class="ug-card glass">
+      <div class="ug-icon tile-cherry"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></div>
+      <h2>Remove OpenSteamTool?</h2>
+      <p>Your game library (luas) stays, and your previous setup is restored if there was one.</p>
+      <button class="btn danger" id="cfOkBtn"><span class="btn-label">Remove</span></button>
+      <button class="btn secondary" id="cfCancelBtn"><span class="btn-label">Cancel</span></button>
     </div>
   </div>
 
