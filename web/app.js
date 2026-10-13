@@ -205,13 +205,37 @@ function showCloudGate() {
   });
 }
 
+// ── save carry-over (Capcom RE Engine games) ──────────────────────────────────
+// Python calls window.__saveProgress(pct, msg, kind) while it re-signs the save.
+// pct null hides the bar; kind is "ok" / "err" for the final message.
+window.__saveProgress = function (pct, msg, kind) {
+  const prog = $("#saveProgress"), out = $("#saveResult");
+  if (prog) {
+    prog.hidden = pct === null || pct === undefined;
+    if (!prog.hidden) {
+      $("#saveBar").style.width = `${pct}%`;
+      $("#savePct").textContent = `${pct}%`;
+    }
+  }
+  if (out && msg) {
+    const safe = String(msg).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    if (kind || out.dataset.msg !== safe) setResult(out, kind || "", safe);
+    out.dataset.msg = safe;
+  }
+};
+function clearSaveStatus() {
+  const prog = $("#saveProgress"), out = $("#saveResult");
+  if (prog) prog.hidden = true;
+  if (out) { clearResult(out); out.dataset.msg = ""; }
+}
+
 // ── redeem ────────────────────────────────────────────────────────────────────
 function initRedeem() {
   const btn = $("#applyBtn"), out = $("#redeemResult");
   btn.addEventListener("click", async () => {
     const code = getCode();
     if (code.length !== 6) { setResult(out, "err", "Enter all 6 characters."); return; }
-    clearResult(out); loading(btn, true);
+    clearResult(out); clearSaveStatus(); loading(btn, true);
     try {
       if (!(await maybeOfferCloud(out))) { loading(btn, false); return; }
       const r = await call("redeem", code);
@@ -521,6 +545,12 @@ function setUpdateProgress(p, m) {
 // matching notes once, then remembers the version so it never nags again. Add a
 // new entry here every release.
 const PATCH_NOTES = {
+  "1.0.31": [
+    "Save carry-over for RE9 Requiem, PRAGMATA, Monster Hunter Stories 3 and Onimusha is fixed for a lot more people. It now runs inside the app and shows its progress right under your code.",
+    "If your PC doesn't have the .NET runtime the save tool needs, the app grabs it by itself. No installer, no admin prompt.",
+    "Each save file is moved over on its own, and files the game doesn't sign are left alone. This stops the carry-over from damaging RE9 and PRAGMATA saves.",
+    "A backup of your save is kept before every carry-over (the last 5), and a log is written to %LOCALAPPDATA%\\TokeerDRM\\save_carry.log if anything goes wrong.",
+  ],
   "1.0.30": [
     "Brand new look: frosted glass, bright colors that change with each tab, and a dock at the bottom for Activate, Generate and Engine.",
     "Server status and the app version now sit in the pill at the top. Hover it to see the engine status.",
@@ -653,6 +683,7 @@ async function startAutoRedeem(code) {
     const clean = fillCodeBoxes(code);
     if (clean.length !== 6) { toast("That link had a bad code.", "err"); return; }
     toast("Code received, applying…", "ok");
+    clearSaveStatus();
 
     // Up to 4 passes; each may auto-run one fix (engine/DLL/cloud) then retry.
     for (let attempt = 0; attempt < 4; attempt++) {

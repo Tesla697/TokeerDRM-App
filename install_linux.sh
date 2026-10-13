@@ -32,7 +32,7 @@ MODE="${2:-steam}"
 
 TDIR="${TOKEER_HOME:-$HOME/.tokeer}"
 SERVER="${TOKEER_DRM_SERVER:-https://luastools.xyz}"
-BUNDLE_URL="${TOKEER_BUNDLE_URL:-https://git.lua.tools/luatools-dedivision/TokeerDRM-App/releases/download/v1.0.30/tokeer-linux.zip}"
+BUNDLE_URL="${TOKEER_BUNDLE_URL:-https://git.lua.tools/luatools-dedivision/TokeerDRM-App/releases/download/v1.0.31/tokeer-linux.zip}"
 
 echo "== Tokeer Linux setup - app $APPID =="
 mkdir -p "$TDIR"

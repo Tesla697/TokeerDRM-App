@@ -10,22 +10,29 @@ This runs right after an activation, BEFORE the game opens. The save folder
 already exists (the account has played before) and the new activation's id is
 known from the appticket, so there is nothing the game needs to create first. It
 makes sure the game isn't running, snapshots the signed-in account's save,
-re-signs it onto the new id in a command prompt the user can watch, writes it
-back, and only then launches the game, once, so it loads the carried-over save.
-Older builds launched the game, killed it and relaunched, and the kill didn't
-always land.
+re-signs it onto the new id, writes it back, and only then launches the game,
+once, so it loads the carried-over save. Older builds launched the game, killed
+it and relaunched, and the kill didn't always land.
 
-The save's current id is read off disk each time (brute-forced) rather than
-guessed, so it never goes stale. Everything here is best effort: any failure is
-logged and leaves the account's own saves alone; it never raises into the UI.
+Each save file's current id is read off disk (brute-forced) rather than guessed,
+so it never goes stale. MandarinJuice runs straight from here with its output
+piped back, and progress shows in the app. Older builds went through a .bat and a
+PowerShell script, which broke on some machines (non-English user names, script
+policies). Every run is written to %LOCALAPPDATA%\\TokeerDRM\\save_carry.log.
+Everything here is best effort: any failure is logged and leaves the account's
+own saves alone; it never raises into the UI.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.request
+import zipfile
 
 STEAMID64_BASE = 76561197960265728
 
@@ -39,11 +46,21 @@ SUPPORTED = {
 }
 
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
-_NEW_CONSOLE = 0x00000010 if sys.platform == "win32" else 0
 
 # If the game is already open when a code is redeemed and we can't close it (it
 # runs elevated, say), wait this long for the user to close it themselves.
 _CLOSE_WAIT_SECONDS = 600
+# A full brute-force sweep takes a couple of minutes; anything past this is hung.
+_CLI_TIMEOUT = 900
+_KEEP_BACKUPS = 5
+
+_DATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "TokeerDRM")
+LOG_PATH = os.path.join(_DATA_DIR, "save_carry.log")
+# MandarinJuice is framework-dependent on .NET 10. When the PC doesn't have it we
+# fetch Microsoft's runtime zip into our own folder and point the tool at it, so
+# there's no installer and no admin prompt.
+_RUNTIME_DIR = os.path.join(_DATA_DIR, "dotnet")
+_RUNTIME_URL = "https://aka.ms/dotnet/10.0/dotnet-runtime-win-x64.zip"
 
 
 def is_supported(app_id: str) -> bool:
@@ -164,140 +181,228 @@ def _tools():
     return cli, profiles
 
 
-def _has_dotnet10() -> bool:
+_log_lock = threading.Lock()
+
+
+def _file_log(msg: str) -> None:
     try:
-        out = subprocess.run(["dotnet", "--list-runtimes"], capture_output=True,
-                             text=True, timeout=15, creationflags=_NO_WINDOW).stdout or ""
-        return any(line.startswith("Microsoft.WindowsDesktop.App 10.")
-                   for line in out.splitlines())
-    except Exception:
-        return False
-
-
-_BRUTE_PS = r"""$ErrorActionPreference = 'SilentlyContinue'
-$cliexe = '@CLI@'
-$prof   = '@PROF@'
-$work   = '@WORK@'
-$log    = '@LOG@'
-# Real save files only (drop the hyphen cache files), slot files first: RE Engine
-# signs the actual save in dataNNNSlot.bin, while data000.bin sits next to it and
-# is not signed with the per-user id, so brute-forcing that one just fails.
-$bins = Get-ChildItem -LiteralPath $work -File -Filter *.bin | Where-Object { $_.BaseName -notlike '*-*' }
-$order = @()
-$order += ($bins | Where-Object { $_.Name -match 'slot' })
-$order += ($bins | Where-Object { $_.Name -notmatch 'slot' })
-if (-not $order) { $order = $bins }
-$found = $false
-foreach ($f in $order) {
-  if ($found) { break }
-  $tmp = Join-Path $env:TEMP ('mjb_' + [guid]::NewGuid().ToString('N'))
-  New-Item -ItemType Directory -Path $tmp | Out-Null
-  Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $tmp $f.Name)
-  Write-Host ''
-  Write-Host ('Checking ' + $f.Name + ' ...')
-  & $cliexe -m b -g $prof -p $tmp -q 2>&1 | ForEach-Object {
-    Write-Host $_
-    $_ | Out-File -FilePath $log -Append -Encoding ascii
-    if ($_ -match 'Found UserID') { $script:found = $true }
-  }
-  Remove-Item -LiteralPath $tmp -Recurse -Force
-}
-"""
-
-_RESIGN_BAT = """@echo off
-setlocal EnableDelayedExpansion
-title Resigning your save
-set "UID="
-echo Detecting your save's ID. This can take a few minutes...
-powershell -NoProfile -ExecutionPolicy Bypass -File "@PS@"
-set "LINE="
-for /f "tokens=*" %%A in ('findstr /c:"Found UserID" "@LOG@"') do set "LINE=%%A"
-for %%B in (!LINE!) do set "UID=%%B"
-set "UID=!UID: =!"
-set "UID=!UID:.=!"
-echo !UID!| findstr /r "^[0-9][0-9]*$" >nul || set "UID="
-if not defined UID (
-  echo.
-  echo Could not detect the save ID. Nothing was changed.
-  echo Press any key to close this window.
-  pause >nul
-  exit /b 1
-)
-echo.
-echo Re-signing your save from !UID! to @NEWUID@ ...
-"@CLI@" -m r -g "@PROF@" -p "@WORK@" -uI !UID! -uO @NEWUID@ -q
-echo.
-echo Done. Press any key to close this window.
-pause >nul
-endlocal
-"""
-
-
-def _resign_console(cli: str, profile: str, work: str, new_uid: str) -> None:
-    """Re-sign the save in `work` onto new_uid in a command prompt the user watches.
-
-    MandarinJuice works in the 32-bit account-id space (its "Found UserID" is a
-    32-bit id), so new_uid is the new activation's 32-bit account id, not the
-    SteamID64. The save's current id is read straight off disk each time by
-    brute-forcing it, trying each save file on its own (slot files first) until one
-    yields an id, so a data000.bin that is not user-signed can't stall it. Then the
-    whole folder is re-signed onto new_uid. The window holds open on a keypress at
-    the end; success is judged by the output files, not the exit code.
-    """
-    def pesc(s):
-        return s.replace("'", "''")
-
-    stamp = int(time.time() * 1000)
-    log_file = os.path.join(os.environ.get("TEMP", "."), "ltbrute_%d.log" % stamp)
-    ps = os.path.join(os.environ.get("TEMP", "."), "ltbrute_%d.ps1" % stamp)
-    bat = os.path.join(os.environ.get("TEMP", "."), "ltresign_%d.bat" % stamp)
-
-    ps_text = (_BRUTE_PS.replace("@CLI@", pesc(cli)).replace("@PROF@", pesc(profile))
-               .replace("@WORK@", pesc(work)).replace("@LOG@", pesc(log_file)))
-    bat_text = (_RESIGN_BAT.replace("@PS@", ps).replace("@LOG@", log_file)
-                .replace("@CLI@", cli).replace("@PROF@", profile)
-                .replace("@WORK@", work).replace("@NEWUID@", new_uid))
-    try:
-        with open(ps, "w", encoding="utf-8") as fh:
-            fh.write(ps_text)
-        with open(bat, "w") as fh:
-            fh.write(bat_text.replace("\n", "\r\n"))
-        try:
-            subprocess.run(["cmd", "/c", bat], cwd=os.path.dirname(cli),
-                          creationflags=_NEW_CONSOLE, timeout=3600)
-        except subprocess.TimeoutExpired:
-            pass
+        os.makedirs(_DATA_DIR, exist_ok=True)
+        with _log_lock:
+            if os.path.isfile(LOG_PATH) and os.path.getsize(LOG_PATH) > 1_000_000:
+                os.replace(LOG_PATH, LOG_PATH + ".old")
+            with open(LOG_PATH, "a", encoding="utf-8") as fh:
+                fh.write("%s  %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
     except Exception:
         pass
+
+
+class _Report:
+    """Sends status to the app (ui(pct, msg, kind)) and to the log file.
+
+    Calling it shows a message and logs it, bar() only moves the progress bar,
+    note() only goes in the log."""
+
+    def __init__(self, ui):
+        self._ui = ui or (lambda *_a: None)
+
+    def _send(self, pct, msg, kind):
+        try:
+            self._ui(pct, msg, kind)
+        except Exception:
+            pass
+
+    def __call__(self, msg, pct=None, kind=None):
+        _file_log(msg)
+        self._send(pct, msg, kind)
+
+    def bar(self, pct, msg):
+        self._send(pct, msg, None)
+
+    def note(self, msg):
+        _file_log(msg)
+
+
+def _runtime_has_10(root: str) -> bool:
+    try:
+        names = os.listdir(os.path.join(root, "shared", "Microsoft.NETCore.App"))
+    except OSError:
+        return False
+    return any(n.startswith("10.") for n in names)
+
+
+def _system_dotnet_roots() -> list:
+    """Where an installed .NET lives, the same places the tool's launcher looks."""
+    roots = []
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\dotnet\Setup\InstalledVersions\x64", 0,
+                            winreg.KEY_READ | winreg.KEY_WOW64_32KEY) as k:
+            roots.append(str(winreg.QueryValueEx(k, "InstallLocation")[0]))
+    except Exception:
+        pass
+    pf = os.environ.get("ProgramW6432") or os.environ.get("ProgramFiles") or r"C:\Program Files"
+    roots.append(os.path.join(pf, "dotnet"))
+    return roots
+
+
+def _dotnet_root(report) -> str:
+    """A .NET folder that has the 10.x runtime, downloading our own copy if the PC
+    has none. Only the base runtime is needed (the tool is a console app)."""
+    for root in _system_dotnet_roots():
+        if root and _runtime_has_10(root):
+            return root
+    if _runtime_has_10(_RUNTIME_DIR):
+        return _RUNTIME_DIR
+
+    report("Getting the .NET runtime the save tool needs (one time, about 37 MB)...", 0)
+    part = _RUNTIME_DIR + ".zip.part"
+    staging = _RUNTIME_DIR + ".new"
+    try:
+        os.makedirs(_DATA_DIR, exist_ok=True)
+        req = urllib.request.Request(_RUNTIME_URL, headers={"User-Agent": "TokeerDRM"})
+        with urllib.request.urlopen(req, timeout=60) as resp, open(part, "wb") as fh:
+            total = int(resp.headers.get("Content-Length") or 0)
+            got, last = 0, -1
+            while True:
+                chunk = resp.read(1 << 16)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                got += len(chunk)
+                pct = got * 100 // total if total else 0
+                if pct != last:
+                    last = pct
+                    report.bar(pct, "Downloading the .NET runtime...")
+        shutil.rmtree(staging, ignore_errors=True)
+        with zipfile.ZipFile(part) as z:
+            z.extractall(staging)
+        shutil.rmtree(_RUNTIME_DIR, ignore_errors=True)
+        os.replace(staging, _RUNTIME_DIR)
+    except Exception as e:
+        report.note("runtime download failed: %r" % e)
     finally:
-        for f in (bat, ps, log_file):
+        for p in (part, staging):
             try:
-                os.remove(f)
+                if os.path.isdir(p):
+                    shutil.rmtree(p, ignore_errors=True)
+                elif os.path.exists(p):
+                    os.remove(p)
             except Exception:
                 pass
+    return _RUNTIME_DIR if _runtime_has_10(_RUNTIME_DIR) else ""
 
 
-def _resigned_files(tools_dir: str, since: float):
-    """The files MandarinJuice just wrote under _OUTPUT\\<ts>_resigned\\<newId>\\."""
-    out_root = os.path.join(tools_dir, "_OUTPUT")
-    if not os.path.isdir(out_root):
-        return None
-    newest, newest_t = None, 0
-    for name in os.listdir(out_root):
-        if not name.endswith("_resigned"):
-            continue
-        p = os.path.join(out_root, name)
-        t = os.path.getmtime(p)
-        if t >= since - 15 and t > newest_t:
-            newest_t, newest = t, p
-    if not newest:
-        return None
-    # Descend the single <newId> subfolder MandarinJuice nests the output in.
-    kids = [os.path.join(newest, d) for d in os.listdir(newest)
-            if os.path.isdir(os.path.join(newest, d))]
-    content = kids[0] if len(kids) == 1 else newest
-    files = [os.path.join(content, f) for f in os.listdir(content)]
-    return files if files else None
+_PCT_RE = re.compile(r"^\[(\d+(?:\.\d+)?)%\]")
+_FOUND_RE = re.compile(r"Found UserID:\s*(\d+)")
+_CLEAN_RE = re.compile(r"Errors:\s*0\b")
+_BANNER = ("~~*", "---", "Good morning", "Good afternoon", "Good evening", "Have a great")
+
+
+def _run_cli(cli: str, args: list, env: dict, on_line=None) -> list:
+    """Run MandarinJuice with its output piped back line by line. Its exit code is
+    always 0, so callers judge success from the output."""
+    lines = []
+    p = subprocess.Popen([cli] + args, cwd=os.path.dirname(cli), env=env,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, creationflags=_NO_WINDOW)
+    killer = threading.Timer(_CLI_TIMEOUT, p.kill)
+    killer.start()
+    try:
+        for raw in p.stdout:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            lines.append(line)
+            if on_line:
+                on_line(line)
+        p.wait()
+    finally:
+        killer.cancel()
+    return lines
+
+
+def _log_line(report, line: str) -> None:
+    if not line.startswith(_BANNER):
+        report.note("  " + line)
+
+
+def _single(run_dir: str, src: str) -> str:
+    """A fresh folder holding only `src`. The tool works on whole folders, and the
+    brute-force only ever looks at the first file in one."""
+    folder = tempfile.mkdtemp(prefix="f_", dir=run_dir)
+    shutil.copy2(src, os.path.join(folder, os.path.basename(src)))
+    return folder
+
+
+def _brute(cli, profile, src, env, run_dir, report) -> str:
+    """The 32-bit id a save file is signed with, or "" if it isn't user-signed."""
+    folder = _single(run_dir, src)
+    name = os.path.basename(src)
+    found = []
+
+    def on_line(line):
+        m = _PCT_RE.match(line)
+        if m:
+            report.bar(int(float(m.group(1))), "Reading your save's ID (%s)..." % name)
+            return
+        _log_line(report, line)
+        f = _FOUND_RE.search(line)
+        if f:
+            found.append(f.group(1))
+
+    try:
+        _run_cli(cli, ["-m", "b", "-g", profile, "-p", folder, "-q"], env, on_line)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    return found[-1] if found else ""
+
+
+def _resign_one(cli, profile, src, old_uid, new_uid, env, run_dir, report) -> str:
+    """Re-sign one file from old_uid to new_uid. Returns the re-signed copy's path,
+    or "" if the file isn't signed with old_uid.
+
+    A file MandarinJuice can't recognise as an encrypted save it doesn't refuse, it
+    just encrypts it as if it were plain data, which wrecks it. So a run only
+    counts when the log shows it decrypted this file first."""
+    folder = _single(run_dir, src)
+    name = os.path.basename(src)
+    out_root = os.path.join(os.path.dirname(cli), "_OUTPUT")
+    before = set(os.listdir(out_root)) if os.path.isdir(out_root) else set()
+    try:
+        lines = _run_cli(cli, ["-m", "r", "-g", profile, "-p", folder,
+                               "-uI", old_uid, "-uO", new_uid, "-q"],
+                         env, lambda line: _log_line(report, line))
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    decrypted = "Decrypting the [%s]" % name
+    if not (any(decrypted in line for line in lines)
+            and any(_CLEAN_RE.search(line) for line in lines)):
+        return ""
+    after = set(os.listdir(out_root)) if os.path.isdir(out_root) else set()
+    for d in sorted(after - before):
+        for root, _dirs, files in os.walk(os.path.join(out_root, d)):
+            if name in files:
+                return os.path.join(root, name)
+    return ""
+
+
+def _backup(files: list, app_dir: str, report) -> None:
+    """Keep a copy of the save as it was, outside the cloud-synced remote folder.
+    One timestamped folder per carry-over, newest few kept."""
+    root = os.path.join(app_dir, "ltsave_backup")
+    dest = os.path.join(root, time.strftime("%Y%m%d-%H%M%S"))
+    try:
+        os.makedirs(dest, exist_ok=True)
+        for f in files:
+            shutil.copy2(f, os.path.join(dest, os.path.basename(f)))
+        stamps = sorted(d for d in os.listdir(root)
+                        if re.fullmatch(r"\d{8}-\d{6}", d) and os.path.isdir(os.path.join(root, d)))
+        for old in stamps[:-_KEEP_BACKUPS]:
+            shutil.rmtree(os.path.join(root, old), ignore_errors=True)
+        report.note("backup: %s" % dest)
+    except Exception as e:
+        report.note("backup failed: %r" % e)
 
 
 def _game_procs(install_dir: str) -> list:
@@ -434,9 +539,36 @@ def _biggest_save(steam: str, app_id: str):
     return best
 
 
-def _restore(app_id: str, new_id: str, log) -> None:
+def _save_files(folder: str) -> list:
+    """The real save files directly in a folder, slot files first. RE Engine signs
+    the actual progress in dataNNNSlot.bin; data000.bin next to it may not be
+    signed with the per-user id at all."""
+    try:
+        names = [n for n in os.listdir(folder)
+                 if os.path.isfile(os.path.join(folder, n))
+                 and not n.lower().endswith(".vdf") and not _is_cache_file(n)]
+    except OSError:
+        return []
+    names.sort(key=lambda n: ("slot" not in n.lower(), n.lower()))
+    return [os.path.join(folder, n) for n in names]
+
+
+def _registry_steam_id(app_id: str) -> str:
+    """The SteamID the engine hands the game for this app (redeem writes it next to
+    the tickets). The game signs its save with exactly this id."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Valve\Steam\Apps\%s" % app_id) as k:
+            return str(winreg.QueryValueEx(k, "SteamID")[0]).strip()
+    except Exception:
+        return ""
+
+
+def _restore(app_id: str, new_id: str, report) -> None:
     steam = steam_path()
     if not steam:
+        report.note("no Steam path in the registry")
         return
     profile_name = SUPPORTED[app_id]
 
@@ -445,10 +577,12 @@ def _restore(app_id: str, new_id: str, log) -> None:
     try:
         n = int(new_id)
     except (TypeError, ValueError):
+        report.note("bad activation id %r" % new_id)
         return
     new_uid = str(n - STEAMID64_BASE if n > STEAMID64_BASE else n)
     active = _logged_in_account32(steam)
     install_dir = _install_dir(steam, app_id)
+    report.note("carry app=%s new=%s active=%s install=%s" % (app_id, new_uid, active, install_dir))
 
     # The game reads and writes its save ONLY in the signed-in account's folder, so
     # that folder holds the latest progress and is also where the carried save goes.
@@ -469,78 +603,125 @@ def _restore(app_id: str, new_id: str, log) -> None:
         # from any other userdata folder and re-sign it into this account's folder.
         best = _biggest_save(steam, app_id)
         if best:
-            log("No save on this Steam account yet; bringing over your save from another folder.")
+            report("No save on this Steam account yet; bringing over your save from another folder.")
             df = best[:3]
     if not df:
-        log("No save found to carry; opening the game.")
+        report("No save found to carry over. Opening the game.", kind="ok")
         _launch(app_id)
         return
     old_data, _old_bytes, rel = df
     target = os.path.join(target_remote, rel) if rel else target_remote
+    report.note("source=%s target=%s" % (old_data, target))
 
     # The game must not be open while we swap the save. Usually it isn't yet: this
     # runs before we launch it.
-    if not _ensure_closed(install_dir, log):
-        log("The game is still open, so your save was not carried over this time.")
+    if not _ensure_closed(install_dir, report):
+        report("The game is still open, so your save was not carried over this time.", kind="err")
         return
 
     try:
-        cli, profiles = _tools()
+        cli_src, profiles = _tools()
     except Exception as e:
-        log("Save tools unavailable (%s); opening the game." % e)
+        report("Save tools unavailable (%s). Opening the game." % e, kind="err")
         _launch(app_id)
         return
     profile = os.path.join(profiles, profile_name)
     if not os.path.isfile(profile):
-        log("No save profile for this game; opening the game.")
-        _launch(app_id)
-        return
-    if not _has_dotnet10():
-        log("Carrying the save over needs the .NET 10 Desktop Runtime. Install it "
-            "from https://dotnet.microsoft.com/download/dotnet/10.0 and redeem again.")
+        report("No save profile for this game. Opening the game.", kind="err")
         _launch(app_id)
         return
 
-    # Snapshot the real save, then re-sign the copy (MandarinJuice never touches it).
-    work = os.path.join(os.environ.get("TEMP", "."),
-                        "ltsave_%s_%d" % (app_id, int(time.time())))
+    dotnet = _dotnet_root(report)
+    if not dotnet:
+        report("Couldn't get the .NET runtime the save tool needs, so your save "
+               "wasn't carried over. Check your internet and redeem again.", kind="err")
+        _launch(app_id)
+        return
+    env = dict(os.environ)
+    env["DOTNET_ROOT"] = dotnet
+    env["DOTNET_ROOT_X64"] = dotnet
+    env.pop("DOTNET_ROOT(x86)", None)
+    report.note("dotnet=%s" % dotnet)
 
-    def _skip_cache(dirpath, names):
-        return [n for n in names
-                if os.path.isfile(os.path.join(dirpath, n)) and _is_cache_file(n)]
+    # Private run folder: our own copy of the tool (so its _OUTPUT only ever holds
+    # this run) and a snapshot of the save (MandarinJuice never touches the real one).
+    run_dir = tempfile.mkdtemp(prefix="ltsave_%s_" % app_id)
     try:
-        shutil.copytree(old_data, work, ignore=_skip_cache)
-    except Exception as e:
-        log("Could not stage the save (%s); opening the game." % e)
-        _launch(app_id)
-        return
+        tool_dir = os.path.join(run_dir, "tool")
+        snap_dir = os.path.join(run_dir, "snap")
+        os.makedirs(tool_dir)
+        os.makedirs(snap_dir)
+        cli = os.path.join(tool_dir, os.path.basename(cli_src))
+        shutil.copy2(cli_src, cli)
+        for f in _save_files(old_data):
+            shutil.copy2(f, os.path.join(snap_dir, os.path.basename(f)))
+        snapshot = _save_files(snap_dir)
+        if not snapshot:
+            report("No save files found to carry over. Opening the game.", kind="ok")
+            _launch(app_id)
+            return
+        report.note("files: %s" % ", ".join(os.path.basename(f) for f in snapshot))
 
-    log("Carrying your save over before the game starts...")
-    since = time.time()
-    _resign_console(cli, profile, work, new_uid)
-    files = _resigned_files(os.path.dirname(cli), since)
-    if not files:
-        shutil.rmtree(work, ignore_errors=True)
-        log("Re-signing failed; your save was not changed. Opening the game.")
-        _launch(app_id)
-        return
+        report("Carrying your save over before the game starts...", 0)
+        # Each file is handled on its own. Files written in different sessions can
+        # be signed with different ids, so an id found on one file is tried on the
+        # rest first (instant), and only a file none of them fit gets brute-forced.
+        known, resigned, current, unread = [], {}, [], []
+        for src in snapshot:
+            name = os.path.basename(src)
+            out = ""
+            for old in known:
+                out = _resign_one(cli, profile, src, old, new_uid, env, run_dir, report)
+                if out:
+                    break
+            if not out:
+                old = _brute(cli, profile, src, env, run_dir, report)
+                report.note("%s signed with %s" % (name, old or "?"))
+                if not old:
+                    unread.append(name)
+                    continue
+                known.append(old)
+                if old == new_uid:
+                    current.append(name)
+                    continue
+                out = _resign_one(cli, profile, src, old, new_uid, env, run_dir, report)
+            if out:
+                resigned[name] = out
+            else:
+                unread.append(name)
 
-    # Back up the untouched save once, OUTSIDE the cloud-synced remote folder, from
-    # the pristine snapshot (MandarinJuice reads `work`, it never modifies it).
-    backup = os.path.join(os.path.dirname(target_remote), "ltsave_backup")
-    if not os.path.exists(backup):
-        try:
-            shutil.copytree(work, backup)
-        except Exception:
-            pass
-    shutil.rmtree(work, ignore_errors=True)
+        report.note("resigned=%s current=%s unread=%s" % (sorted(resigned), current, unread))
+        if not resigned:
+            if current:
+                report("Your save already matches this activation. Opening the game.", kind="ok")
+            else:
+                report("Couldn't read your save's ID, so it was left as it was. "
+                       "Opening the game.", kind="err")
+            _launch(app_id)
+            return
 
-    os.makedirs(target, exist_ok=True)
-    for f in files:
-        try:
-            shutil.copy2(f, os.path.join(target, os.path.basename(f)))
-        except Exception as e:
-            log("Could not write %s (%s)." % (os.path.basename(f), e))
+        # The brute-force takes a while; make sure nobody opened the game meanwhile,
+        # or it would overwrite what we're about to write (or hold the files open).
+        if not _ensure_closed(install_dir, report):
+            report("The game is still open, so your save was not carried over this time.", kind="err")
+            return
+
+        _backup(snapshot, os.path.dirname(target_remote), report)
+
+        os.makedirs(target, exist_ok=True)
+        failed = []
+        for name, path in resigned.items():
+            try:
+                shutil.copy2(path, os.path.join(target, name))
+            except Exception as e:
+                failed.append(name)
+                report.note("write %s failed: %r" % (name, e))
+        if failed:
+            report("Couldn't write %s. Close anything using the save folder and redeem again."
+                   % ", ".join(failed), kind="err")
+            return
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
 
     # Drop leftover marker files older builds wrote into the save folder.
     for junk in (".ltsave_userid", ".ltsave_signed"):
@@ -567,7 +748,7 @@ def _restore(app_id: str, new_id: str, log) -> None:
     except Exception:
         pass
 
-    log("Carried your save over. Starting the game...")
+    report("Your save was carried over. Starting the game...", kind="ok")
     _launch(app_id)
 
 
@@ -579,28 +760,36 @@ _armed_lock = threading.Lock()
 _finished: dict = {}
 
 
-def start(app_id: str, new_id: str, log=None) -> None:
-    """Kick off the carry-over in the background. No-op for unsupported games or
-    when the activation SteamID isn't known. Guarded so redeem() and run_game()
-    firing in the same one-click flow arm it only once per game."""
+def start(app_id: str, new_id: str = "", ui=None) -> None:
+    """Kick off the carry-over in the background. ui(pct, msg, kind) gets status
+    for the app. No-op for unsupported games or when the activation SteamID isn't
+    known. Guarded so redeem() and run_game() firing in the same one-click flow arm
+    it only once per game."""
     app_id = "".join(c for c in str(app_id) if c.isdigit())
-    log = log or (lambda _m: None)
-    if not is_supported(app_id) or not new_id:
+    if not is_supported(app_id):
+        return
+    new_id = str(new_id or _registry_steam_id(app_id))
+    if not new_id:
+        _file_log("app=%s: no activation SteamID, nothing to carry" % app_id)
         return
 
     with _armed_lock:
-        if app_id in _armed or time.time() - _finished.get((app_id, str(new_id)), 0) < 60:
+        if app_id in _armed or time.time() - _finished.get((app_id, new_id), 0) < 60:
             return
         _armed.add(app_id)
 
+    report = _Report(ui)
+
     def worker():
         try:
-            _restore(app_id, str(new_id), log)
+            _restore(app_id, new_id, report)
         except Exception as e:
-            log("Save carry-over skipped: %s" % e)
+            report.note("crashed: %r" % e)
+            report("Save carry-over skipped: %s" % e, kind="err")
+            _launch(app_id)
         finally:
             with _armed_lock:
                 _armed.discard(app_id)
-                _finished[(app_id, str(new_id))] = time.time()
+                _finished[(app_id, new_id)] = time.time()
 
     threading.Thread(target=worker, daemon=True).start()

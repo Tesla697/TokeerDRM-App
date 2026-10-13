@@ -45,7 +45,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.30"                       # bump on every release
+APP_VERSION = "1.0.31"                       # bump on every release
 UPDATE_REPO = "luatools-dedivision/TokeerDRM-App"  # Forgejo repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -373,6 +373,17 @@ def _push_progress(pct, msg):
         if WINDOW is not None:
             WINDOW.evaluate_js(
                 f"window.__ostProgress && window.__ostProgress({int(pct)}, {json.dumps(msg)})")
+    except Exception:
+        pass
+
+
+def _push_save(pct, msg, kind=None):
+    """Save carry-over status for the Activate tab (pct None hides the bar)."""
+    try:
+        if WINDOW is not None:
+            WINDOW.evaluate_js(
+                "window.__saveProgress && window.__saveProgress(%s, %s, %s)"
+                % (json.dumps(pct), json.dumps(msg), json.dumps(kind)))
     except Exception:
         pass
 
@@ -919,7 +930,7 @@ class Api:
         # flow (run_game) or manually from Steam. It re-signs the save onto this
         # activation before the game opens, then launches the game itself.
         if owner and save_watchdog.is_supported(app_id):
-            save_watchdog.start(app_id, owner, log=lambda m: _push_progress(50, m))
+            save_watchdog.start(app_id, owner, ui=_push_save)
 
         return {
             "ok": True,
@@ -937,9 +948,9 @@ class Api:
         # launches the game itself, so hand off to it instead of launching here
         # (guarded against double-arming).
         if save_watchdog.is_supported(app_id):
-            new_id = _LAST_ACTIVATION.get(app_id) or _current_steam_id()
-            save_watchdog.start(app_id, new_id,
-                                log=lambda m: _push_progress(50, m))
+            # Not the logged-in account: the game signs with the spoofed id, which
+            # start() reads from the registry when this session didn't redeem it.
+            save_watchdog.start(app_id, _LAST_ACTIVATION.get(app_id, ""), ui=_push_save)
             return {"ok": True, "app_id": app_id}
 
         try:

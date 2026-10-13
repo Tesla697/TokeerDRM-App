@@ -13,8 +13,10 @@ it onto the new activation's id with the official mandarin-juice-cli (linux),
 writes it back, drops the stale cache, and then launches the game so it loads the
 carried-over progress.
 
-The save's current id is read off disk each time (brute-forced) rather than
-guessed. The re-sign is adaptive: the CLI's "Found UserID" tells us whether this
+Each save file's current id is read off disk (brute-forced) rather than guessed,
+and each file is re-signed on its own: a file that isn't encrypted (RE9 and
+PRAGMATA keep a plain data000.bin) is left alone, since the CLI would otherwise
+encrypt it and break it. The re-sign is adaptive: the CLI's "Found UserID" tells us whether this
 build works in the 32-bit account id or the full SteamID64, and the new id is
 handed back in the same shape, so it can't mismatch. Everything is best effort:
 any failure is logged and leaves the account's own saves alone.
@@ -25,6 +27,8 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
+import threading
 import time
 import urllib.request
 
@@ -40,6 +44,10 @@ SUPPORTED = {
 }
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+
+# A full brute-force sweep takes a couple of minutes; anything past this is hung.
+_CLI_TIMEOUT = 1800
+_KEEP_BACKUPS = 5
 
 
 def is_supported(app_id: str) -> bool:
@@ -327,54 +335,139 @@ def _dotnet_env(log):
     return None
 
 
-def _brute_old_id(cli, profile, work, env, log):
-    """Run the CLI's brute-force on the real save files (slot files first) until one
-    yields the id it was signed with. Returns (found_id_str, is_64bit) or (None, False)."""
+_PCT_RE = re.compile(r"^\[(\d+(?:\.\d+)?)%\]")
+_FOUND_RE = re.compile(r"Found UserID:\s*(\d+)")
+_CLEAN_RE = re.compile(r"Errors:\s*0\b")
+_BANNER = ("~~*", "---", "Good morning", "Good afternoon", "Good evening", "Have a great")
+
+
+def _run_cli(cli, args, env, on_line=None) -> list:
+    """Run the CLI with its output piped back line by line. Its exit code is always
+    0, so callers judge success from the output."""
+    lines = []
+    p = subprocess.Popen([cli] + args, cwd=os.path.dirname(cli), env=env,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT)
+    killer = threading.Timer(_CLI_TIMEOUT, p.kill)
+    killer.start()
     try:
-        bins = [f for f in os.listdir(work)
-                if f.lower().endswith(".bin") and not _is_cache_file(f)]
+        for raw in p.stdout:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            lines.append(line)
+            if on_line:
+                on_line(line)
+        p.wait()
+    finally:
+        killer.cancel()
+    return lines
+
+
+def _single(run_dir, src) -> str:
+    """A fresh folder holding only `src`. The CLI works on whole folders, and the
+    brute-force only ever looks at the first file in one."""
+    folder = tempfile.mkdtemp(prefix="f_", dir=run_dir)
+    shutil.copy2(src, os.path.join(folder, os.path.basename(src)))
+    return folder
+
+
+def _brute(cli, profile, src, env, run_dir, log) -> str:
+    """The id a save file is signed with, or "" if it isn't user-signed."""
+    folder = _single(run_dir, src)
+    name = os.path.basename(src)
+    found, step = [], [-1]
+
+    def on_line(line):
+        m = _PCT_RE.match(line)
+        if m:
+            pct = int(float(m.group(1)))
+            if pct // 25 != step[0]:
+                step[0] = pct // 25
+                _log(log, "  %s: %d%%" % (name, pct))
+            return
+        f = _FOUND_RE.search(line)
+        if f:
+            found.append(f.group(1))
+
+    _log(log, "Reading the id on %s ..." % name)
+    try:
+        _run_cli(cli, ["-m", "b", "-g", profile, "-p", folder, "-q"], env, on_line)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    return found[-1] if found else ""
+
+
+def _resign_one(cli, profile, src, old_id, new_id, env, run_dir) -> str:
+    """Re-sign one file from old_id to new_id. Returns the re-signed copy's path, or
+    "" if the file isn't signed with old_id.
+
+    A file the CLI can't recognise as an encrypted save it doesn't refuse, it just
+    encrypts it as if it were plain data, which wrecks it. So a run only counts
+    when the output shows it decrypted this file first."""
+    folder = _single(run_dir, src)
+    name = os.path.basename(src)
+    out_root = os.path.join(os.path.dirname(cli), "_OUTPUT")
+    before = set(os.listdir(out_root)) if os.path.isdir(out_root) else set()
+    try:
+        lines = _run_cli(cli, ["-m", "r", "-g", profile, "-p", folder,
+                               "-uI", old_id, "-uO", new_id, "-q"], env)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    decrypted = "Decrypting the [%s]" % name
+    if not (any(decrypted in line for line in lines)
+            and any(_CLEAN_RE.search(line) for line in lines)):
+        return ""
+    after = set(os.listdir(out_root)) if os.path.isdir(out_root) else set()
+    for d in sorted(after - before):
+        for root, _dirs, files in os.walk(os.path.join(out_root, d)):
+            if name in files:
+                return os.path.join(root, name)
+    return ""
+
+
+def _save_files(folder: str) -> list:
+    """The real save files directly in a folder, slot files first. RE Engine signs
+    the actual progress in dataNNNSlot.bin; data000.bin next to it may not be
+    encrypted at all."""
+    try:
+        names = [n for n in os.listdir(folder)
+                 if os.path.isfile(os.path.join(folder, n))
+                 and not n.lower().endswith(".vdf") and not _is_cache_file(n)]
     except OSError:
-        bins = []
-    order = [f for f in bins if "slot" in f.lower()] + [f for f in bins if "slot" not in f.lower()]
-    for name in order or bins:
-        tmp = os.path.join(work, ".mjb_%d" % int(time.time() * 1000))
-        try:
-            os.makedirs(tmp, exist_ok=True)
-            shutil.copy2(os.path.join(work, name), os.path.join(tmp, name))
-            _log(log, "Checking %s ..." % name)
-            r = subprocess.run([cli, "-m", "b", "-g", profile, "-p", tmp, "-q"],
-                               capture_output=True, text=True, timeout=1800, env=env,
-                               cwd=os.path.dirname(cli))
-            m = re.search(r"Found UserID\D*(\d+)", (r.stdout or "") + (r.stderr or ""))
-            if m:
-                fid = m.group(1)
-                return fid, int(fid) >= STEAMID64_BASE
-        except Exception:
-            pass
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-    return None, False
+        return []
+    names.sort(key=lambda n: ("slot" not in n.lower(), n.lower()))
+    return [os.path.join(folder, n) for n in names]
 
 
-def _resigned_files(cli_dir: str, since: float):
-    out_root = os.path.join(cli_dir, "_OUTPUT")
-    if not os.path.isdir(out_root):
-        return None
-    newest, newest_t = None, 0
-    for name in os.listdir(out_root):
-        if not name.endswith("_resigned"):
-            continue
-        p = os.path.join(out_root, name)
-        t = os.path.getmtime(p)
-        if t >= since - 15 and t > newest_t:
-            newest_t, newest = t, p
-    if not newest:
-        return None
-    kids = [os.path.join(newest, d) for d in os.listdir(newest)
-            if os.path.isdir(os.path.join(newest, d))]
-    content = kids[0] if len(kids) == 1 else newest
-    files = [os.path.join(content, f) for f in os.listdir(content)]
-    return files if files else None
+def _backup(files: list, app_dir: str, log) -> None:
+    """Keep a copy of the save as it was, outside the cloud-synced remote folder.
+    One timestamped folder per carry-over, newest few kept."""
+    root = os.path.join(app_dir, "ltsave_backup")
+    dest = os.path.join(root, time.strftime("%Y%m%d-%H%M%S"))
+    try:
+        os.makedirs(dest, exist_ok=True)
+        for f in files:
+            shutil.copy2(f, os.path.join(dest, os.path.basename(f)))
+        stamps = sorted(d for d in os.listdir(root)
+                        if re.fullmatch(r"\d{8}-\d{6}", d) and os.path.isdir(os.path.join(root, d)))
+        for old in stamps[:-_KEEP_BACKUPS]:
+            shutil.rmtree(os.path.join(root, old), ignore_errors=True)
+    except Exception as e:
+        _log(log, "Could not back up the save (%s)." % e)
+
+
+def _close_game(install_dir, app_id, log) -> bool:
+    if not _game_procs(install_dir, app_id):
+        return True
+    _log(log, "Closing the game to swap your save in...")
+    _kill_game(install_dir, app_id)
+    for _ in range(10):
+        if not _game_procs(install_dir, app_id):
+            time.sleep(2)  # let it release the save files
+            return True
+        time.sleep(1)
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -424,89 +517,107 @@ def carry_over(app_id: str, new_owner_steamid: str, steam_root: str = "",
     old_data, _b, rel = df
     target = os.path.join(target_remote, rel) if rel else target_remote
 
-    # The save folder already exists, so there is nothing to have the game create.
-    # Snapshot it now (before anything can touch it), make sure no game instance is
-    # holding the files, then re-sign in place. This avoids launching and racing the
-    # game just to settle a folder that is already there.
-    work = os.path.join("/tmp", "ltsave_%s_%d" % (app_id, int(time.time())))
-
-    def _skip_cache(dirpath, names):
-        return [x for x in names
-                if os.path.isfile(os.path.join(dirpath, x)) and _is_cache_file(x)]
-    try:
-        shutil.copytree(old_data, work, ignore=_skip_cache)
-    except Exception as e:
-        _log(log, "Could not stage the save (%s); skipping." % e)
-        return False
-
-    if _game_procs(install_dir, app_id):
-        _log(log, "Closing the game to swap your save in...")
-        _kill_game(install_dir, app_id)
-        time.sleep(3)
+    # No game instance may hold the files while we read and swap them.
+    if not _close_game(install_dir, app_id, log):
+        _log(log, "The game is still running, so your save was not carried over.")
+        return True
 
     try:
-        cli, profiles = _tools()
+        cli_src, profiles = _tools()
     except Exception as e:
         _log(log, "Save tools unavailable (%s); skipping." % e)
-        shutil.rmtree(work, ignore_errors=True)
         _launch(app_id)
         return True
     profile = os.path.join(profiles, profile_name)
     if not os.path.isfile(profile):
         _log(log, "No save profile for this game; skipping.")
-        shutil.rmtree(work, ignore_errors=True)
         _launch(app_id)
         return True
 
     env = _dotnet_env(log)
     if not env:
-        shutil.rmtree(work, ignore_errors=True)
         _launch(app_id)
         return True
 
-    _log(log, "Detecting your save's id (this can take a few minutes)...")
-    found, is64 = _brute_old_id(cli, profile, work, env, log)
-    if not found:
-        _log(log, "Could not detect the save id; your account was not changed.")
-        shutil.rmtree(work, ignore_errors=True)
-        _launch(app_id)
-        return True
-
-    new_out = new64 if is64 else new32
-    _log(log, "Re-signing your save from %s to %s ..." % (found, new_out))
-    since = time.time()
+    # Private run folder: our own copy of the CLI (so its _OUTPUT only holds this
+    # run, and the bundle dir never has to be writable) and a snapshot of the save.
+    run_dir = tempfile.mkdtemp(prefix="ltsave_%s_" % app_id)
     try:
-        subprocess.run([cli, "-m", "r", "-g", profile, "-p", work,
-                        "-uI", found, "-uO", new_out, "-q"],
-                       timeout=1800, env=env, cwd=os.path.dirname(cli))
-    except Exception as e:
-        _log(log, "Re-signing failed (%s); your account was not changed." % e)
-        shutil.rmtree(work, ignore_errors=True)
-        _launch(app_id)
-        return True
+        cli = os.path.join(run_dir, os.path.basename(cli_src))
+        shutil.copy2(cli_src, cli)
+        os.chmod(cli, 0o755)
+        snap_dir = os.path.join(run_dir, "snap")
+        os.makedirs(snap_dir)
+        for f in _save_files(old_data):
+            shutil.copy2(f, os.path.join(snap_dir, os.path.basename(f)))
+        snapshot = _save_files(snap_dir)
+        if not snapshot:
+            _log(log, "No save files found to carry; opening the game.")
+            _launch(app_id)
+            return True
 
-    files = _resigned_files(os.path.dirname(cli), since)
-    if not files:
-        _log(log, "Re-signing produced no files; your account was not changed.")
-        shutil.rmtree(work, ignore_errors=True)
-        _launch(app_id)
-        return True
+        _log(log, "Carrying your save over (this can take a few minutes)...")
+        # Each file is handled on its own. Files written in different sessions can
+        # be signed with different ids, so an id found on one file is tried on the
+        # rest first (instant), and only a file none of them fit gets brute-forced.
+        # The new id is handed back in the same shape the CLI reported (32-bit
+        # account id or full SteamID64) so it can't mismatch.
+        known, resigned, current, unread = [], {}, [], []
+        for src in snapshot:
+            name = os.path.basename(src)
+            out = ""
+            for old in known:
+                new_out = new64 if int(old) >= STEAMID64_BASE else new32
+                out = _resign_one(cli, profile, src, old, new_out, env, run_dir)
+                if out:
+                    break
+            if not out:
+                old = _brute(cli, profile, src, env, run_dir, log)
+                if not old:
+                    unread.append(name)
+                    continue
+                known.append(old)
+                new_out = new64 if int(old) >= STEAMID64_BASE else new32
+                if old == new_out:
+                    current.append(name)
+                    continue
+                _log(log, "Re-signing %s from %s to %s ..." % (name, old, new_out))
+                out = _resign_one(cli, profile, src, old, new_out, env, run_dir)
+            if out:
+                resigned[name] = out
+            else:
+                unread.append(name)
+        if unread:
+            _log(log, "Left as they were (not signed per account): %s" % ", ".join(unread))
 
-    # Back up the untouched save once, outside the cloud-synced remote folder.
-    backup = os.path.join(os.path.dirname(target_remote), "ltsave_backup")
-    if not os.path.exists(backup):
-        try:
-            shutil.copytree(work, backup)
-        except Exception:
-            pass
-    shutil.rmtree(work, ignore_errors=True)
+        if not resigned:
+            if current:
+                _log(log, "Your save already matches this activation; opening the game.")
+            else:
+                _log(log, "Could not read the save id; your save was not changed.")
+            _launch(app_id)
+            return True
 
-    os.makedirs(target, exist_ok=True)
-    for f in files:
-        try:
-            shutil.copy2(f, os.path.join(target, os.path.basename(f)))
-        except Exception as e:
-            _log(log, "Could not write %s (%s)." % (os.path.basename(f), e))
+        # The brute-force takes a while; make sure nobody opened the game meanwhile.
+        if not _close_game(install_dir, app_id, log):
+            _log(log, "The game is still running, so your save was not carried over.")
+            return True
+
+        _backup(snapshot, os.path.dirname(target_remote), log)
+
+        os.makedirs(target, exist_ok=True)
+        failed = []
+        for name, path in resigned.items():
+            try:
+                shutil.copy2(path, os.path.join(target, name))
+            except Exception as e:
+                failed.append(name)
+                _log(log, "Could not write %s (%s)." % (name, e))
+        if failed:
+            _log(log, "Your save was only partly carried over; run tokeer resign to try again.")
+            return True
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
 
     # Drop the game's stale cache/index files so it rebuilds them against the
     # freshly signed save instead of the previous activation's.
@@ -526,6 +637,6 @@ def carry_over(app_id: str, new_owner_steamid: str, steam_root: str = "",
     except OSError:
         pass
 
-    _log(log, "Carried your save over. Restarting the game...")
+    _log(log, "Carried your save over. Starting the game...")
     _launch(app_id)
     return True
