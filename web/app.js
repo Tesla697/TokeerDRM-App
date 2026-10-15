@@ -545,6 +545,10 @@ function setUpdateProgress(p, m) {
 // matching notes once, then remembers the version so it never nags again. Add a
 // new entry here every release.
 const PATCH_NOTES = {
+  "1.0.32": [
+    "Save carry-over now waits for Steam to finish signing in before it picks your save, so it no longer guesses the wrong one when you redeem right after launch.",
+    "It also reads the account your game is actually signed in as and signs the save to that, which fixes the cases where a save came across but the game acted like it wasn't there.",
+  ],
   "1.0.31": [
     "Save carry-over for RE9 Requiem, PRAGMATA, Monster Hunter Stories 3 and Onimusha is fixed for a lot more people. It now runs inside the app and shows its progress right under your code.",
     "If your PC doesn't have the .NET runtime the save tool needs, the app grabs it by itself. No installer, no admin prompt.",

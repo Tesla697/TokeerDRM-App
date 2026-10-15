@@ -573,14 +573,35 @@ def _restore(app_id: str, new_id: str, report) -> None:
     profile_name = SUPPORTED[app_id]
 
     # The id the game signs its save with = the activation account (what its
-    # spoofed GetSteamID returns), as a 32-bit account id.
+    # spoofed GetSteamID returns), as a 32-bit account id. Read it live from the
+    # credential store (what GetSpoofSteamID actually returns) rather than trusting
+    # the value handed in: redeem writes it there, so a second redeem before this
+    # runs leaves the passed value stale while the registry is current.
+    live = _registry_steam_id(app_id)
+    if live:
+        if str(live) != str(new_id):
+            report.note("using live credential SteamID %s (was handed %s)" % (live, new_id))
+        new_id = live
     try:
         n = int(new_id)
     except (TypeError, ValueError):
         report.note("bad activation id %r" % new_id)
         return
     new_uid = str(n - STEAMID64_BASE if n > STEAMID64_BASE else n)
+
+    # The save must go in the SIGNED-IN account's folder. Right after a redeem
+    # Steam may still be starting up or logging in, so ActiveUser isn't set yet;
+    # that's the run-1 case where we fell back to guessing the folder off disk
+    # (wrong when more than one account has played). Wait briefly for the login.
     active = _logged_in_account32(steam)
+    if not active:
+        for _ in range(15):
+            time.sleep(1)
+            active = _logged_in_account32(steam)
+            if active:
+                break
+        if not active:
+            report.note("Steam account still unknown after waiting; using biggest save on disk")
     install_dir = _install_dir(steam, app_id)
     report.note("carry app=%s new=%s active=%s install=%s" % (app_id, new_uid, active, install_dir))
 
