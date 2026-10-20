@@ -49,4 +49,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon='app_icon.ico',
+    # Real file/product metadata. A onefile exe with no version resource scores
+    # higher on Defender/SmartScreen heuristics, so this trims false positives.
+    version='version_info.txt',
 )
