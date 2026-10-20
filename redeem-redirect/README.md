@@ -1,5 +1,10 @@
 # TokeerDRM one-click redeem redirect
 
+> The worker sources (`worker.js`, `privacy.worker.js`, `tokeer-api-proxy.worker.js`,
+> `ost-release.worker.js`) are not kept in this repo. They name origin hosts we don't
+> publish, so they live with the deployment instead. Ask a maintainer if you need them.
+
+
 Turns the Discord **🚀 Redeem in TokeerDRM App** button into a one-click activation.
 
 ```
@@ -14,7 +19,7 @@ The bot already links to `https://luastools.xyz/redeem?code=<code>` — you just
 ## Option A — Cloudflare Worker (recommended, domain already on Cloudflare)
 
 1. Cloudflare dashboard → **Workers & Pages** → **Create** → **Worker** → name it e.g. `tokeerdrm-redeem`.
-2. **Edit code** → paste the contents of [`worker.js`](worker.js) → **Deploy**.
+2. **Edit code** → paste the contents of `worker.js` → **Deploy**.
 3. Back on the Worker → **Settings → Domains & Routes → Add → Route**:
    - Route: `luastools.xyz/redeem*`
    - Zone: `luastools.xyz`
@@ -22,7 +27,7 @@ The bot already links to `https://luastools.xyz/redeem?code=<code>` — you just
 
 ## Option B — Cloudflare Pages (static)
 
-1. Put [`index.html`](index.html) in a folder as `redeem/index.html`.
+1. Put `index.html` in a folder as `redeem/index.html`.
 2. Deploy that folder as a Pages project, add `luastools.xyz` as a custom domain.
 3. It serves at `https://luastools.xyz/redeem?code=…`.
 
@@ -60,6 +65,7 @@ route that overlaps another one silently breaks it, so keep these separate:
 | `luastools.xyz/redeem*` | redeem redirect (HTML bounce to `tokeerdrm://`) | `worker.js` |
 | `luastools.xyz/drm/*` and `/quota*` | code-store reverse proxy | `tokeer-api-proxy.worker.js` |
 | `luastools.xyz/privacy*` | public privacy policy | `privacy.worker.js` |
+| `luastools.xyz/selif/*` and `/report/*` | D-Report store + ticket auto-submit (claim/verdict) | `dreport.worker.js` |
 
 `/privacy` exists because Discord's privileged-intent review (Guild Members +
 Message Content) requires a public policy URL that a reviewer can open while
@@ -75,7 +81,7 @@ once per cache window and serves every user from Cloudflare's edge, so no user
 spends their own quota.
 
 1. Workers & Pages -> Create -> Worker -> name it `ost-release` -> paste
-   [`ost-release.worker.js`](ost-release.worker.js) -> Deploy.
+   `ost-release.worker.js` -> Deploy.
 2. Settings -> Domains & Routes -> Add -> Route: `luastools.xyz/ost/*`
    (zone `luastools.xyz`).
 3. Settings -> Variables -> add a secret `GITHUB_TOKEN` (fine-grained PAT, public
