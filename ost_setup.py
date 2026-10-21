@@ -698,10 +698,7 @@ def _shutdown_steam(sp, progress=None, lo=0, hi=0):
 
 
 def _start_steam(sp):
-    try:
-        os.startfile(os.path.join(sp, "steam.exe"))  # noqa: S606
-    except Exception:
-        subprocess.Popen([os.path.join(sp, "steam.exe")], creationflags=_NO_WINDOW)
+    launch_as_desktop_user(os.path.join(sp, "steam.exe"))
 
 
 def is_admin():
@@ -710,6 +707,103 @@ def is_admin():
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         return False
+
+
+# --- which Windows account Steam runs as -----------------------------------
+# On a standard Windows account, approving a UAC prompt with an admin's password
+# runs the program as THAT admin, with the admin's HKCU. Denuvo tickets live in
+# HKCU, so a ticket written under one account is invisible to a Steam running as
+# another (Denuvo 88500000, "no ticket"). Our elevated helpers used to restart
+# Steam themselves, which put Steam on the admin account. These keep Steam on the
+# person at the desk and send the ticket to whichever account Steam really uses.
+
+def launch_as_desktop_user(target):
+    """Open an exe or URL as the logged-in desktop user, not elevated. From an
+    elevated process, Explorer (which runs as the desktop user) does the launch."""
+    if is_admin():
+        try:
+            subprocess.Popen(["explorer.exe", target], creationflags=_NO_WINDOW)
+            return
+        except Exception:
+            pass
+    try:
+        os.startfile(target)  # noqa: S606
+    except Exception:
+        subprocess.Popen([target], creationflags=_NO_WINDOW)
+
+
+def steam_pids():
+    """PIDs of every running steam.exe."""
+    try:
+        out = subprocess.run(["tasklist", "/fi", "imagename eq steam.exe", "/fo", "csv", "/nh"],
+                             capture_output=True, text=True, creationflags=_NO_WINDOW).stdout
+    except Exception:
+        return set()
+    pids = set()
+    for line in out.splitlines():
+        parts = [p.strip('"') for p in line.split('","')]
+        if len(parts) > 1 and parts[0].lower() == "steam.exe" and parts[1].isdigit():
+            pids.add(int(parts[1]))
+    return pids
+
+
+def _active_steam_pid(root, prefix=""):
+    """The pid Steam recorded under <root>\\<prefix>Software\\Valve\\Steam\\ActiveProcess.
+    Steam writes it into the hive of the account it runs as."""
+    import winreg
+    try:
+        with winreg.OpenKey(root, prefix + r"Software\Valve\Steam\ActiveProcess") as k:
+            return int(winreg.QueryValueEx(k, "pid")[0])
+    except Exception:
+        return 0
+
+
+def loaded_steam_hives():
+    """SIDs of loaded user hives (HKEY_USERS) that have Steam settings in them."""
+    import winreg
+    sids = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_USERS, "") as users:
+            i = 0
+            while True:
+                try:
+                    sid = winreg.EnumKey(users, i)
+                except OSError:
+                    break
+                i += 1
+                if not sid.startswith("S-1-5-21-") or sid.endswith("_Classes"):
+                    continue
+                try:
+                    winreg.OpenKey(winreg.HKEY_USERS, sid + r"\Software\Valve\Steam").Close()
+                    sids.append(sid)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return sids
+
+
+def steam_on_other_account():
+    """True when Steam is running but NOT as this process's account (it never
+    recorded its pid in our HKCU). Only meaningful when we aren't admin."""
+    import winreg
+    running = steam_pids()
+    return bool(running) and _active_steam_pid(winreg.HKEY_CURRENT_USER) not in running
+
+
+def ticket_hives():
+    """User hives (SIDs) a ticket must also go into, besides our own HKCU. Needs
+    admin to write them. Steam running: the hive Steam recorded its pid in. Steam
+    not running (or unmatched): every loaded hive with Steam in it, since we can't
+    tell which account will start it."""
+    import winreg
+    hives = loaded_steam_hives()
+    running = steam_pids()
+    if running:
+        owners = [s for s in hives if _active_steam_pid(winreg.HKEY_USERS, s + "\\") in running]
+        if owners:
+            return owners
+    return hives
 
 
 def _packaged() -> bool:

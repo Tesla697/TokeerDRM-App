@@ -45,7 +45,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.32"                       # bump on every release
+APP_VERSION = "1.0.33"                       # bump on every release
 UPDATE_REPO = "luatools-dedivision/TokeerDRM-App"  # Forgejo repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -310,8 +310,15 @@ def _write_registry(app_id: str, appticket_hex: str, eticket_hex: str) -> None:
 
     Written as REG_SZ decimal digits, which is the only form the engine parses."""
     import winreg
-    key_path = f"Software\\Valve\\Steam\\Apps\\{app_id}"
-    key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0,
+    _write_ticket_key(winreg.HKEY_CURRENT_USER, "", app_id, appticket_hex, eticket_hex)
+
+
+def _write_ticket_key(root, prefix: str, app_id: str, appticket_hex: str, eticket_hex: str) -> None:
+    """Write the ticket under <root>\\<prefix>Software\\Valve\\Steam\\Apps\\<appid>.
+    prefix is "<SID>\\" when writing another account's hive under HKEY_USERS."""
+    import winreg
+    key_path = f"{prefix}Software\\Valve\\Steam\\Apps\\{app_id}"
+    key = winreg.CreateKeyEx(root, key_path, 0,
                              winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE)
     try:
         winreg.SetValueEx(key, "AppTicket", 0, winreg.REG_BINARY, bytes.fromhex(appticket_hex))
@@ -330,6 +337,66 @@ def _write_registry(app_id: str, appticket_hex: str, eticket_hex: str) -> None:
                 pass
     finally:
         winreg.CloseKey(key)
+
+
+def _write_ticket_other_accounts(app_id: str, appticket_hex: str, eticket_hex: str) -> int:
+    """Admin only: copy the ticket into the hive of the account Steam runs as (or
+    every loaded Steam account when Steam isn't running). Covers a standard user
+    whose Steam or app got elevated onto an admin account. Returns hives written."""
+    import winreg
+    written = 0
+    for sid in ost_setup.ticket_hives():
+        try:
+            _write_ticket_key(winreg.HKEY_USERS, sid + "\\", app_id, appticket_hex, eticket_hex)
+            written += 1
+        except OSError:
+            pass
+    return written
+
+
+def _ticket_handoff_file() -> str:
+    # %PUBLIC%, so the elevated helper finds it whichever account UAC elevates to.
+    base = os.environ.get("PUBLIC") or tempfile.gettempdir()
+    return os.path.join(base, "tokeerdrm_ticket_handoff.json")
+
+
+def _write_ticket_elevated(app_id: str, appticket_hex: str, eticket_hex: str) -> bool:
+    """Ask for admin once and let the elevated helper put the ticket into the
+    account Steam is running as. Used when Steam runs under an account this
+    process can't write to. False if the prompt was declined or it failed."""
+    path = _ticket_handoff_file()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"app_id": app_id, "appticket": appticket_hex, "eticket": eticket_hex}, f)
+        ost_setup.clear_result()
+        ost_setup.relaunch_elevated("--write-ticket", timeout_s=60)
+        res = ost_setup.read_result() or {}
+        return bool(res.get("ok"))
+    except Exception:
+        return False
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _write_ticket_helper_main() -> dict:
+    """Elevated side of _write_ticket_elevated."""
+    path = _ticket_handoff_file()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    # Our own HKCU here is the admin account UAC elevated to, which is usually the
+    # account Steam got moved onto, so this write alone already fixes it.
+    _write_registry(d["app_id"], d["appticket"], d["eticket"])
+    n = _write_ticket_other_accounts(d["app_id"], d["appticket"], d["eticket"])
+    return {"ok": True, "hives": n}
 
 
 def _server_post(path: str, body: dict, timeout: int = 25) -> tuple[int, dict]:
@@ -920,6 +987,21 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": f"Registry write failed: {e}"}
 
+        # The ticket must also be in the registry of the Windows account Steam runs
+        # as. On a standard account an admin password can put the app or Steam on
+        # the admin account, and then the game finds no ticket (88500000).
+        warning = ""
+        try:
+            if ost_setup.is_admin():
+                _write_ticket_other_accounts(app_id, appticket, eticket)
+            elif ost_setup.steam_on_other_account():
+                if not _write_ticket_elevated(app_id, appticket, eticket):
+                    warning = ("Steam is running under a different Windows account, so the game "
+                               "can't see this activation. Exit Steam from the tray, open it again "
+                               "normally (it shouldn't ask for a password), then launch the game.")
+        except Exception:
+            pass
+
         # Remember which account this activation runs under, so the save watchdog
         # knows the userdata folder the game will land in when it launches.
         owner = _appticket_owner_steamid(appticket)
@@ -936,6 +1018,7 @@ class Api:
             "ok": True,
             "app_id": app_id,
             "uses_remaining": data.get("uses_remaining"),
+            "warning": warning,
         }
 
     def run_game(self, app_id: str) -> dict:
@@ -956,7 +1039,9 @@ class Api:
         try:
             url = f"steam://rungameid/{app_id}"
             if sys.platform == "win32":
-                os.startfile(url)  # hand off to Steam's URL handler
+                # As the desktop user even if we're elevated, so a Steam that isn't
+                # running yet doesn't start on an admin account.
+                ost_setup.launch_as_desktop_user(url)
             else:
                 import webbrowser
                 webbrowser.open(url)
@@ -1138,6 +1223,12 @@ if __name__ == "__main__":
             ost_setup.write_result({"ok": False, "message": str(exc)})
         finally:
             ost_setup.write_progress(100, "Done")
+        sys.exit(0)
+    if "--write-ticket" in sys.argv:
+        try:
+            ost_setup.write_result(_write_ticket_helper_main())
+        except Exception as exc:
+            ost_setup.write_result({"ok": False, "message": str(exc)})
         sys.exit(0)
     if "--uninstall-engine" in sys.argv:
         try:

@@ -239,7 +239,12 @@ function initRedeem() {
     try {
       if (!(await maybeOfferCloud(out))) { loading(btn, false); return; }
       const r = await call("redeem", code);
-      if (r.ok) {
+      if (r.ok && r.warning) {
+        // Steam is on another Windows account and the ticket couldn't reach it.
+        setResult(out, "err", r.warning);
+        toast("Applied, but Steam needs a restart", "err");
+        clearCode();
+      } else if (r.ok) {
         setResult(out, "ok", `Ticket applied for app ${r.app_id}. Auto-launching the game…`);
         toast("Applied, launching game", "ok");
         clearCode();
@@ -545,6 +550,11 @@ function setUpdateProgress(p, m) {
 // matching notes once, then remembers the version so it never nags again. Add a
 // new entry here every release.
 const PATCH_NOTES = {
+  "1.0.33": [
+    "Fixed the 00 error on PCs with more than one Windows account. If Steam or the app ever asked for another account's password, the activation could land on that other account and the game couldn't find it.",
+    "Your code now always goes to the Windows account Steam is actually running on, so this sorts itself out without you doing anything.",
+    "When the app restarts Steam after a fix or an update, Steam now opens on your normal account instead of the admin one.",
+  ],
   "1.0.32": [
     "Save carry-over now waits for Steam to finish signing in before it picks your save, so it no longer guesses the wrong one when you redeem right after launch.",
     "It also reads the account your game is actually signed in as and signs the save to that, which fixes the cases where a save came across but the game acted like it wasn't there.",
@@ -696,6 +706,12 @@ async function startAutoRedeem(code) {
       try { r = await call("redeem", clean); }
       catch (e) { setResult(out, "err", String(e)); break; }
 
+      if (r && r.ok && r.warning) {
+        setResult(out, "err", r.warning);
+        toast("Applied, but Steam needs a restart", "err");
+        clearCode();
+        break;
+      }
       if (r && r.ok) {
         setResult(out, "ok", `Ticket applied for app ${r.app_id}. Launching the game…`);
         toast("Applied, launching game", "ok");

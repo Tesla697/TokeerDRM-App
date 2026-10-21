@@ -492,7 +492,8 @@ def _ensure_closed(install_dir: str, log) -> bool:
 def _launch(app_id: str) -> None:
     try:
         if sys.platform == "win32":
-            os.startfile("steam://rungameid/%s" % app_id)
+            import ost_setup  # as the desktop user even when we're elevated
+            ost_setup.launch_as_desktop_user("steam://rungameid/%s" % app_id)
         else:
             import webbrowser
             webbrowser.open("steam://rungameid/%s" % app_id)
