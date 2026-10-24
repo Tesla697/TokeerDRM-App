@@ -65,8 +65,12 @@ ENGINE_CORES = ("OpenSteamTool.dll",)  # the only Denuvo-capable engine we suppo
 # install_custom_dll() always writes OpenSteamTool.dll — so on an mktl machine the
 # enhanced DLL landed in a file Steam never loaded. It's now purely foreign, so those
 # installs get repaired onto real OpenSteamTool instead.
-FOREIGN_CORES = ("mktl.dll", "cloud_redirect.dll")
+FOREIGN_CORES = ("mktl.dll", "cloud_redirect.dll", "LumaCore.dll")
 FOREIGN_PROXIES = ("hid.dll", "version.dll", "winhttp.dll")
+# Steam never ships these, so any copy in the Steam folder was dropped there to hook
+# Steam. Luma's DWrite.dll loaded ahead of OST and none of OST's hooks ever fired,
+# so every game got 00 even with a good ticket.
+FOREIGN_HOOKS = ("dwrite.dll",)
 _OWN_MARKERS = (b"OpenSteamTool",)
 # Bytes that positively identify a foreign unlocker's proxy/core. SteamTools' hid.dll
 # carries NO "SteamTools"/"stplug" string, so we fingerprint it by its update hosts
@@ -74,7 +78,7 @@ _OWN_MARKERS = (b"OpenSteamTool",)
 # name "Vale_SteamIPC" — all verified against a real SteamTools hid.dll.
 _FOREIGN_MARKERS = (
     b"cloud_redirect", b"SteamTools", b"steamtools", b"stplug", b"LuaTools", b"luatools",
-    b"steamui.com", b"stools.oss", b"Vale_SteamIPC",
+    b"steamui.com", b"stools.oss", b"Vale_SteamIPC", b"LumaCore",
 )
 
 # Marker we drop in the Steam folder recording the OST release tag we installed, so
@@ -189,8 +193,22 @@ LUATOOLS_URL = "https://lua.tools"
 # Steam location + engine detection
 # ---------------------------------------------------------------------------
 
+def _argv_steam_path():
+    """The Steam folder the app handed an elevated helper. An admin password at the
+    UAC prompt runs the helper as another account whose registry points somewhere
+    else (or nowhere), so it must use the folder the user's own app saw."""
+    if "--steam-path" in sys.argv:
+        i = sys.argv.index("--steam-path")
+        if i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+    return None
+
+
 def steam_path():
     """Resolve the Steam install dir from the registry (Windows only)."""
+    p = _argv_steam_path()
+    if p and os.path.exists(os.path.join(p, "steam.exe")):
+        return p
     try:
         import winreg
     except ImportError:
@@ -228,6 +246,14 @@ def _toml_points_at_stplugin(sp):
             return "stplug-in" in f.read()
     except OSError:
         return False
+
+
+def missing_engine_files(sp=None):
+    """Engine files that should be in the Steam folder but aren't."""
+    sp = sp or steam_path()
+    if not sp:
+        return list(OST_DLLS)
+    return [d for d in OST_DLLS if not os.path.exists(os.path.join(sp, d))]
 
 
 def _proxy_is_engine(sp):
@@ -281,6 +307,16 @@ def _disable_foreign_engines(sp):
     for core in FOREIGN_CORES:
         if _disable_file(os.path.join(sp, core)):
             disabled.append(core)
+    for name in _foreign_hooks(sp):
+        if _disable_file(os.path.join(sp, name)):
+            disabled.append(name)
+    return disabled
+
+
+def _foreign_hooks(sp):
+    """Another engine's DLLs that Steam itself loads from its folder. While any of
+    these are there they hook Steam alongside OST and can starve it (code 00)."""
+    found = [h for h in FOREIGN_HOOKS if os.path.exists(os.path.join(sp, h))]
     for proxy in FOREIGN_PROXIES:
         p = os.path.join(sp, proxy)
         if not os.path.exists(p):
@@ -292,11 +328,18 @@ def _disable_foreign_engines(sp):
             continue
         if any(m in data for m in _OWN_MARKERS):
             continue  # it's ours — leave it
-        # Only disable a proxy we can positively tie to a known unlocker, so we never
+        # Only flag a proxy we can positively tie to a known unlocker, so we never
         # rename a legitimate Steam DLL out from under Steam.
-        if any(s in data for s in _FOREIGN_MARKERS) and _disable_file(p):
-            disabled.append(proxy)
-    return disabled
+        if any(s in data for s in _FOREIGN_MARKERS):
+            found.append(proxy)
+    return found
+
+
+def _restart_steam_if_hooked(sp, disabled):
+    """A disabled hook DLL stays loaded in a running Steam until it restarts."""
+    if any(n not in FOREIGN_CORES for n in disabled) and _steam_running():
+        _shutdown_steam(sp)
+        _start_steam(sp)
 
 
 def engine_status():
@@ -322,13 +365,15 @@ def engine_status():
     # The hijack proxies must belong to OpenSteamTool, not SteamTools/mktl.
     proxy_ok = _proxy_is_engine(sp)
     toml_ok = _toml_points_at_stplugin(sp)
+    foreign = _foreign_hooks(sp)
     return {
         "steam_path": sp,
         "engine": engine,
         "installed": installed,
         "proxy_ok": proxy_ok,
         "toml_ok": toml_ok,
-        "ready": installed and toml_ok and proxy_ok,
+        "foreign": foreign,
+        "ready": installed and toml_ok and proxy_ok and not foreign,
         "steam_running": _steam_running(),
     }
 
@@ -844,6 +889,9 @@ def relaunch_elevated(flag="--install-engine", timeout_s=240, on_progress=None):
     else:
         target = sys.executable  # python.exe
         params = f'"{os.path.abspath(__file__).replace("ost_setup.py", "tokeer_drm.py")}" {flag}'
+    sp = steam_path()
+    if sp:
+        params += f' --steam-path "{sp.rstrip(chr(92))}"'
 
     class SHELLEXECUTEINFOW(ctypes.Structure):
         _fields_ = [
@@ -950,9 +998,9 @@ def install_ost(progress=_noop, fallback_zip=None, force=False):
         progress(50, "OpenSteamTool found — finishing setup…")
         _add_defender_exclusion(sp)
         # A previous engine's core (e.g. cloud_redirect.dll) may still be sitting
-        # here, so other managers keep showing it as active — clear it. Safe while
-        # Steam runs: OST's proxies are active, so these files aren't loaded.
-        _disable_foreign_engines(sp)
+        # here, so other managers keep showing it as active — clear it. A foreign
+        # hook DLL is loaded though, so Steam restarts to drop it.
+        _restart_steam_if_hooked(sp, _disable_foreign_engines(sp))
         progress(80, "Letting it read your existing library…")
         try:
             _ensure_toml(sp)
@@ -1122,7 +1170,7 @@ def install_ost_custom(progress=_noop, fallback_zip=None, force=False):
     if dlls_present and not force and _proxy_is_engine(sp) and custom_dll_installed(sp):
         progress(50, "Custom OpenSteamTool found — finishing setup…")
         _add_defender_exclusion(sp)
-        _disable_foreign_engines(sp)
+        _restart_steam_if_hooked(sp, _disable_foreign_engines(sp))
         progress(80, "Letting it read your existing library…")
         try:
             _ensure_toml(sp)
@@ -1179,40 +1227,22 @@ def install_ost_custom(progress=_noop, fallback_zip=None, force=False):
 
     # Step 2: our custom core DLL.
     progress(42, "Downloading custom OpenSteamTool.dll…")
-    try:
-        req = urllib.request.Request(CUSTOM_OST_API, headers={"User-Agent": "TokeerDRM"})
-        rel_data = json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
-    except Exception as e:
-        return {"ok": False, "message": f"Couldn't reach custom DLL release: {e}"}
+    # Same path as the DLL updater: our mirror first, then GitHub, with retries and a
+    # checksum, so one broken connection doesn't fail the whole install.
+    rel_data, _src = _release_json(timeout=30)
+    if rel_data is None:
+        return {"ok": False, "message": "Couldn't reach the custom DLL release. Try again shortly."}
+    asset, is_zip = _pick_dll_asset(rel_data)
+    if not asset:
+        return {"ok": False, "message": "Custom DLL not found in the release assets."}
+    custom_raw, err = _download_dll_asset(asset.get("browser_download_url") or "",
+                                          rel_data.get("tag_name") or "", asset.get("name") or "",
+                                          lambda p, m: progress(42 + (p - 15) * 13 // 45, m),
+                                          _asset_digest(asset))
+    if not custom_raw:
+        return {"ok": False, "message": _download_failed_message(err)}
 
-    asset = next((a for a in rel_data.get("assets", [])
-                  if a.get("name", "").lower() == "opensteamtool.dll"), None)
-    zip_asset = None if asset else next(
-        (a for a in rel_data.get("assets", [])
-         if "release" in a.get("name", "").lower() and a["name"].lower().endswith(".zip")), None)
-    if not asset and not zip_asset:
-        return {"ok": False, "message": "Custom DLL not found in the GitHub release assets."}
-
-    try:
-        url = (asset or zip_asset)["browser_download_url"]
-        req = urllib.request.Request(url, headers={"User-Agent": "TokeerDRM"})
-        resp = urllib.request.urlopen(req, timeout=120)
-        total = int(resp.headers.get("Content-Length") or 0)
-        buf = io.BytesIO()
-        got = 0
-        while True:
-            chunk = resp.read(65536)
-            if not chunk:
-                break
-            buf.write(chunk)
-            got += len(chunk)
-            if total:
-                progress(42 + int(got * 13 / total), "Downloading custom DLL…")
-        custom_raw = buf.getvalue()
-    except Exception as e:
-        return {"ok": False, "message": f"Couldn't download custom DLL: {e}"}
-
-    if zip_asset:
+    if is_zip:
         try:
             with zipfile.ZipFile(io.BytesIO(custom_raw)) as z:
                 entry = next((n for n in z.namelist()
@@ -1698,11 +1728,14 @@ def _download_dll_asset(url, tag, name, progress=_noop, digest=""):
     """Walk the sources until one hands over the file intact. A download that arrives
     truncated or rewritten (AV in the middle) fails the digest and we move on to the
     next source instead of installing a broken DLL. Returns (bytes, error)."""
-    urls = _dll_download_urls(url, tag, name)
+    # Each source gets a second go: a dropped TLS record ("bad record mac") is usually
+    # a one-off, and the retry goes through fine.
+    urls = [u for u in _dll_download_urls(url, tag, name) for _ in range(2)]
     err = "no download URL"
     for i, u in enumerate(urls):
         if i:
-            progress(15, "Retrying from a different source…")
+            progress(15, "Retrying the download…")
+            time.sleep(1)
         raw, err = _download_bytes(u, progress, lo=15, hi=60)
         if raw and digest and _sha256_bytes(raw) != digest:
             err = "the file arrived corrupted (checksum mismatch)"

@@ -2,11 +2,11 @@
 # PyInstaller version resource. Giving the exe real file/product metadata
 # (CompanyName, ProductName, version) lowers Defender/SmartScreen heuristic
 # scores a bare onefile exe otherwise collects. Keep the numbers in step with
-# APP_VERSION in tokeer_drm.py: 1.0.33 -> (1, 0, 33, 0).
+# APP_VERSION in tokeer_drm.py: 1.0.34 -> (1, 0, 34, 0).
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 33, 0),
-    prodvers=(1, 0, 33, 0),
+    filevers=(1, 0, 34, 0),
+    prodvers=(1, 0, 34, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -22,12 +22,12 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', 'LuaTools'),
             StringStruct('FileDescription', 'TokeerDRM'),
-            StringStruct('FileVersion', '1.0.33.0'),
+            StringStruct('FileVersion', '1.0.34.0'),
             StringStruct('InternalName', 'TokeerDRM'),
             StringStruct('LegalCopyright', 'Copyright (c) LuaTools'),
             StringStruct('OriginalFilename', 'TokeerDRM.exe'),
             StringStruct('ProductName', 'TokeerDRM'),
-            StringStruct('ProductVersion', '1.0.33.0')
+            StringStruct('ProductVersion', '1.0.34.0')
           ]
         )
       ]

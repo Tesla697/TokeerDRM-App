@@ -42,7 +42,7 @@ function loading(btn, on) {
 function initTabs() {
   const glider = $("#glider");
   const tabs = $$(".tab");
-  const move = (tab) => { glider.style.left = `${tab.offsetLeft}px`; glider.style.width = `${tab.offsetWidth}px`; };
+  const move = (tab) => { glider.style.translate = `${tab.offsetLeft - 7}px 0`; glider.style.width = `${tab.offsetWidth}px`; };
   tabs.forEach((tab) => {
     tab.addEventListener("click", () => {
       const was = $(".tab.active");
@@ -375,6 +375,8 @@ async function refreshEngine() {
     }
     const ok = !!(s && s.ready);
     if (ok) hideEngineBanner();
+    else if (s && s.foreign && s.foreign.length)
+      showEngineBanner(`Another unlocker (${s.foreign.join(", ")}) is hooking Steam and blocks activations. Click Finish setup to turn it off.`);
     else showEngineBanner(s && s.installed
       ? "Finish OpenSteamTool setup so it reads your library."
       : undefined);
@@ -550,6 +552,12 @@ function setUpdateProgress(p, m) {
 // matching notes once, then remembers the version so it never nags again. Add a
 // new entry here every release.
 const PATCH_NOTES = {
+  "1.0.34": [
+    "Fixed a 00 error caused by another unlocker hiding in your Steam folder (like a DWrite.dll from Luma). The app now spots it, tells you, and turns it off when you click Finish setup.",
+    "Installing OpenSteamTool no longer says it worked when it didn't. If your antivirus removes the files, or Windows ran the install on a different account, you now get told what happened and what to do.",
+    "The engine download retries and switches servers when the connection drops, so the SSL \"bad record mac\" error doesn't stop the install anymore.",
+    "Animations are smoother and use less of your PC.",
+  ],
   "1.0.33": [
     "Fixed the 00 error on PCs with more than one Windows account. If Steam or the app ever asked for another account's password, the activation could land on that other account and the game couldn't find it.",
     "Your code now always goes to the Windows account Steam is actually running on, so this sorts itself out without you doing anything.",
@@ -811,7 +819,7 @@ function spawnBubble(box, first) {
     if (b.classList.contains("pop")) return;
     const r = b.getBoundingClientRect();
     const cs = getComputedStyle(b);
-    b.style.translate = cs.translate; b.style.marginLeft = cs.marginLeft;
+    b.style.translate = cs.translate; b.style.transform = cs.transform;
     b.classList.add("pop");
     burstAt(r.left + r.width / 2, r.top + r.height / 2, 6, size);
     setTimeout(() => { b.remove(); spawnBubble(box, false); }, 340);
@@ -830,23 +838,32 @@ function initFx() {
   // the glow trails the cursor like it's floating in water
   const glow = $("#cursorGlow");
   let tx = innerWidth / 2, ty = innerHeight * 0.4, gx = tx, gy = ty;
+  let hover = null, hx = 0, hy = 0, frame = 0, last = performance.now();
+  // one frame per batch of pointer moves; the glow loop stops once it catches up
+  const step = () => {
+    frame = 0;
+    if (hover) {
+      const r = hover.getBoundingClientRect();
+      hover.style.setProperty("--mx", `${hx - r.left}px`);
+      hover.style.setProperty("--my", `${hy - r.top}px`);
+      hover = null;
+    }
+    if (!glow) return;
+    const dt = Math.min((performance.now() - last) / 16.7, 4);
+    last = performance.now();
+    const k = 1 - Math.pow(1 - 0.07, dt);
+    gx += (tx - gx) * k; gy += (ty - gy) * k;
+    glow.style.transform = `translate3d(${gx}px, ${gy}px, 0)`;
+    if (Math.abs(tx - gx) > 0.3 || Math.abs(ty - gy) > 0.3) frame = requestAnimationFrame(step);
+  };
+  const kick = () => { if (!frame) { last = performance.now(); frame = requestAnimationFrame(step); } };
   document.addEventListener("pointermove", (e) => {
     tx = e.clientX; ty = e.clientY;
-    const t = e.target.closest && e.target.closest(".glass, .btn");
-    if (t) {
-      const r = t.getBoundingClientRect();
-      t.style.setProperty("--mx", `${e.clientX - r.left}px`);
-      t.style.setProperty("--my", `${e.clientY - r.top}px`);
-    }
-  });
-  if (glow) {
-    const step = () => {
-      gx += (tx - gx) * 0.07; gy += (ty - gy) * 0.07;
-      glow.style.transform = `translate(${gx}px, ${gy}px)`;
-      requestAnimationFrame(step);
-    };
-    requestAnimationFrame(step);
-  }
+    hover = e.target.closest && e.target.closest(".glass, .btn");
+    hx = e.clientX; hy = e.clientY;
+    kick();
+  }, { passive: true });
+  kick();
 
   // ripple + a few bubbles on every press
   document.addEventListener("pointerdown", (e) => {

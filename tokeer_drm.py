@@ -45,7 +45,7 @@ try:
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.33"                       # bump on every release
+APP_VERSION = "1.0.34"                       # bump on every release
 UPDATE_REPO = "luatools-dedivision/TokeerDRM-App"  # Forgejo repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -674,9 +674,18 @@ class Api:
             res = ost_setup.read_result() or {}
             if res.get("defender"):  # Defender blocked it → route to LuaTools
                 return res
-            # Trust the elevated helper's success result — engine_status() can
-            # be transiently False right after a Steam restart (race window).
+            # Trust the helper on readiness (the toml can lag a Steam restart), but
+            # not on the files: antivirus can delete them right after the helper
+            # writes them, and then the app sat on "installed" with nothing there.
             if res.get("ok"):
+                time.sleep(3)
+                missing = ost_setup.missing_engine_files()
+                if missing:
+                    return {"ok": False, "message": (
+                        f"Setup finished, but {', '.join(missing)} isn't in your Steam folder "
+                        f"({ost_setup.steam_path()}). Your antivirus most likely removed it. Add an "
+                        "exception for the Steam folder or pause real-time protection, then click "
+                        "Install again.")}
                 return {"ok": True, "message": res.get("message") or "OpenSteamTool ready. Sign in to Steam, then redeem."}
             st = ost_setup.engine_status()
             if st.get("ready"):
@@ -934,9 +943,13 @@ class Api:
         except Exception:
             st = None
         if st is not None and not st.get("ready"):
-            msg = ("OpenSteamTool isn't set up yet — finish setup/repair on the Engine tab, then redeem."
-                   if st.get("installed")
-                   else "OpenSteamTool isn't installed — install it on the Engine tab, then redeem.")
+            if st.get("foreign"):
+                msg = (f"Another unlocker ({', '.join(st['foreign'])}) is hooking Steam and would "
+                       "block this activation. Click Finish setup on the Engine tab to turn it off, then redeem.")
+            elif st.get("installed"):
+                msg = "OpenSteamTool isn't set up yet — finish setup/repair on the Engine tab, then redeem."
+            else:
+                msg = "OpenSteamTool isn't installed — install it on the Engine tab, then redeem."
             return {"ok": False, "error": msg, "engine_fix": True, "engine": st}
 
         # Gate on custom DLL — don't burn a one-use code on a session that may give

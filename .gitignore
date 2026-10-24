@@ -23,3 +23,7 @@ OpenSteamTool-Release.zip
 server_config.py
 
 *.log
+
+# cloudflare worker sources - infra, and they name origins we don't publish
+redeem-redirect/*.worker.js
+redeem-redirect/worker.js
