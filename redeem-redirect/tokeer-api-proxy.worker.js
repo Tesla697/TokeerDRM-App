@@ -41,11 +41,14 @@
 //   codestore.luastools.xyz -> :8091  code store  (/drm/*, /quota*)
 //   backend.luastools.xyz   -> :8080  Tokeer API  (/eticket)
 //
+// backend goes over http: Cloudflare talks https to that origin and the box only
+// speaks plain http on 8080, so https here fails with a 525 every time.
+//
 // Anything not matching a prefix here is refused, so the proxy can never be
 // used as an open relay to arbitrary origin paths.
 const ROUTES = [
   { prefixes: ["/drm/", "/quota"], origin: "https://codestore.luastools.xyz" },
-  { prefixes: ["/eticket"],        origin: "https://backend.luastools.xyz" },
+  { prefixes: ["/eticket"],        origin: "http://backend.luastools.xyz" },
 ];
 
 function resolveOrigin(pathname) {
