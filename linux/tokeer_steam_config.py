@@ -4,11 +4,12 @@ Auto-configure Steam for a Tokeer Linux/Proton game - no manual Steam UI.
 
 Given an appid + the launch-option string, this:
   1. sets the game's **Launch Options** in every user's localconfig.vdf,
-  2. forces the game onto GE-Proton10-34 via config.vdf's CompatToolMapping,
-     downloading it into compatibilitytools.d first if it isn't installed. It
-     switches even when the game is already mapped to another Proton, because
-     the Denuvo hook needs the modern Proton ABI and an old build fails in ways
-     that look like a broken activation, and
+  2. maps the game to the best Proton for it via config.vdf's CompatToolMapping -
+     a per-game pick (see choose_proton), defaulting to Proton Experimental.
+     Steam installs the Valve Protons itself on first launch. It switches even
+     when the game is already mapped to another Proton, because the Denuvo hook
+     needs a modern Proton ABI and an old build fails in ways that look like a
+     broken activation, and
   3. points Steam's **Default compatibility tool** (appid 0 in the same mapping)
      at that same Proton. If the default disagrees with the per-game override,
      Steam falls back to the default on the next launch / after a reboot and the
@@ -189,175 +190,96 @@ def set_launch_options(path, appid, opts):
 # --------------------------------------------------------------------------- #
 # Proton (compat tool) auto-select
 # --------------------------------------------------------------------------- #
-TARGET_PROTON = "GE-Proton10-34"
-_GE_URL = ("https://github.com/GloriousEggroll/proton-ge-custom/releases/download/"
-           "{n}/{n}.tar.gz")
-_GE_SUM = ("https://github.com/GloriousEggroll/proton-ge-custom/releases/download/"
-           "{n}/{n}.sha512sum")
+# The problem this solves: one hardcoded Proton can't run every Denuvo title.
+# Some launch on Experimental but not stable, some need a newer build than Valve
+# ships, and the symptom is always the same from the user's side - the game just
+# doesn't start, which reads as a broken activation.
+#
+# So instead of forcing one version we pick the best available per game:
+#   1. a per-app override (PROTON_BY_APP) for titles we've pinned to a known-good
+#      version - first entry that's actually installed wins,
+#   2. otherwise Proton Experimental, Valve's most up-to-date build. Steam
+#      auto-installs it the same way it did stable 11, and of the always-available
+#      Valve Protons it's the one most likely to run an arbitrary new title,
+#   3. and if a game's override names a community build (a GE-Proton in
+#      compatibilitytools.d), we only use it when it's really there.
+#
+# Internal CompatToolMapping names: proton_experimental, proton_11, proton_9,
+# proton_hotfix, ...; community tools use the key in their compatibilitytool.vdf
+# (e.g. GE-Proton9-20). The Valve names below always "resolve" because Steam
+# fetches them on first launch; community names must be detected on disk.
+DEFAULT_PROTON = "proton_experimental"
+# Last resort if even the default somehow can't be used - the version every
+# Tokeer game ran on before this per-game logic existed, so behaviour can only
+# improve, never regress.
+FALLBACK_PROTON = "proton_11"
+
+# Valve Protons Steam will install on demand, so they count as available without
+# being on disk yet. Anything not here must be found in compatibilitytools.d.
+_VALVE_PROTONS = {
+    "proton_experimental", "proton_hotfix", "proton_11", "proton_10",
+    "proton_9", "proton_8", "proton_7", "proton_63", "proton_513",
+}
+
+# Per-app Proton preference, highest first. Pin a game here when a specific
+# version is the one that actually boots it. The confirmed-working titles are
+# pinned to stable 11 (what they run on today) so smartening the default can't
+# regress them; everything unlisted gets DEFAULT_PROTON.
+PROTON_BY_APP = {
+    "1570010": ["proton_11"],   # FAR: Changing Tides (confirmed)
+    "3321460": ["proton_11"],   # Crimson Desert (confirmed)
+}
 
 
-def _proton_version_key(name):
-    n = name.lower()
-    nums = [int(x) for x in re.findall(r"\d+", n)] or [0]
-    return (("ge-proton" in n or "cachyos" in n), nums)
-
-
-def compat_dirs(root):
-    """Every compatibilitytools.d worth looking in, most canonical first."""
-    out = []
-    for d in (os.path.join(root, "compatibilitytools.d"),
-              os.path.expanduser("~/.steam/root/compatibilitytools.d"),
-              os.path.expanduser("~/.local/share/Steam/compatibilitytools.d")):
-        if d not in out:
-            out.append(d)
-    return out
-
-
-def find_proton(root, name):
-    """Install path of a compat tool by folder name, or None. A folder only counts
-    when it actually holds a build, so a half-extracted leftover from an
-    interrupted download doesn't read as installed."""
-    for d in compat_dirs(root):
-        p = os.path.join(d, name)
-        if os.path.isdir(os.path.join(p, "files")) or os.path.isdir(os.path.join(p, "dist")):
-            return p
-    return None
-
-
-def newest_proton(root):
-    """Best-guess newest installed Proton tool folder name, or None."""
-    names = []
-    for pat in (
-        os.path.join(root, "compatibilitytools.d", "*"),
-        os.path.expanduser("~/.steam/root/compatibilitytools.d/*"),
-        os.path.join(root, "steamapps", "common", "Proton*"),
-    ):
-        for p in glob.glob(pat):
-            if os.path.isdir(p):
-                names.append(os.path.basename(p))
-    if not names:
-        return None
-    names.sort(key=_proton_version_key, reverse=True)
-    # Steam's internal key for bundled Protons is "proton_<ver>"; custom tools in
-    # compatibilitytools.d are keyed by their folder name verbatim.
-    return names[0]
-
-
-def _fetch(url, dest=None, label=""):
-    """Download to `dest`, or return the bytes when dest is None. Prints coarse
-    progress so a 400 MB Proton doesn't look like a hang. None on any failure."""
-    import urllib.request
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Tokeer"})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            if dest is None:
-                return r.read()
-            total = int(r.headers.get("Content-Length") or 0)
-            got = 0
-            step = 10
-            with open(dest, "wb") as fh:
-                while True:
-                    chunk = r.read(1 << 20)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-                    got += len(chunk)
-                    if total:
-                        pct = got * 100 // total
-                        if pct >= step:
-                            print("    %s %d%% (%d/%d MiB)" % (label, pct, got >> 20, total >> 20))
-                            step = pct - (pct % 10) + 10
-            return True
-    except Exception as e:
-        print("    download failed: %s" % e, file=sys.stderr)
-        return None
-
-
-def _safe_extract(tar_path, into):
-    """Unpack a Proton tarball, refusing any member that would escape `into`.
-    tarfile will happily write ../ paths otherwise."""
-    import tarfile
-    into_abs = os.path.abspath(into)
-    with tarfile.open(tar_path, "r:gz") as tf:
-        for m in tf.getmembers():
-            target = os.path.abspath(os.path.join(into_abs, m.name))
-            if not (target == into_abs or target.startswith(into_abs + os.sep)):
-                raise RuntimeError("refusing unsafe path in tarball: %s" % m.name)
-            if m.issym() or m.islnk():
-                link = os.path.abspath(os.path.join(os.path.dirname(target), m.linkname))
-                if not (link == into_abs or link.startswith(into_abs + os.sep)):
-                    raise RuntimeError("refusing unsafe link in tarball: %s" % m.name)
-        tf.extractall(into)
-
-
-def install_proton(root, name=TARGET_PROTON):
-    """Download and unpack a GE-Proton build into compatibilitytools.d.
-
-    Returns its path, or None if anything went wrong. Callers treat None as "keep
-    whatever Proton the user already has" rather than an error, since a failed
-    download shouldn't block the rest of setup."""
-    dest_dir = compat_dirs(root)[0]
-    try:
-        os.makedirs(dest_dir, exist_ok=True)
-    except OSError as e:
-        print("  could not create %s: %s" % (dest_dir, e), file=sys.stderr)
-        return None
-
-    tmp = os.path.join(dest_dir, "." + name + ".tar.gz")
-    print("  downloading %s (about 400 MB, one time)..." % name)
-    if not _fetch(_GE_URL.format(n=name), tmp, label=name):
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        return None
-
-    # GE publishes a sha512sum beside the tarball. Verify whenever we can reach
-    # it: this archive gets executed, so a corrupted or swapped download matters.
-    want = _fetch(_GE_SUM.format(n=name))
-    if want:
-        import hashlib
-        h = hashlib.sha512()
-        with open(tmp, "rb") as fh:
-            for blk in iter(lambda: fh.read(1 << 20), b""):
-                h.update(blk)
-        expect = want.decode("utf-8", "replace").split()[0].strip().lower()
-        if h.hexdigest() != expect:
-            print("  checksum mismatch, discarding the download", file=sys.stderr)
+def community_tools(roots):
+    """Internal names of the GE-style compat tools installed under
+    compatibilitytools.d (both the per-user dirs and each Steam root). The name
+    Steam maps on is the first key inside compatibilitytool.vdf, which is also
+    (for GE) the folder name, so we read the vdf and fall back to the folder."""
+    names = set()
+    dirs = [os.path.expanduser("~/.steam/root/compatibilitytools.d"),
+            os.path.expanduser("~/.local/share/Steam/compatibilitytools.d")]
+    dirs += [os.path.join(r, "compatibilitytools.d") for r in roots]
+    seen = set()
+    for d in dirs:
+        if d in seen or not os.path.isdir(d):
+            continue
+        seen.add(d)
+        for entry in os.listdir(d):
+            sub = os.path.join(d, entry)
+            if not os.path.isdir(sub):
+                continue
+            vdf = os.path.join(sub, "compatibilitytool.vdf")
+            got = None
             try:
-                os.remove(tmp)
+                txt = open(vdf, "r", encoding="utf-8", errors="replace").read()
+                m = re.search(r'"compatibilitytools"\s*\{.*?"compat_tools"\s*\{\s*"([^"]+)"',
+                              txt, re.DOTALL)
+                if m:
+                    got = m.group(1)
             except OSError:
                 pass
-            return None
-        print("  checksum ok")
-
-    print("  unpacking...")
-    try:
-        _safe_extract(tmp, dest_dir)
-    except Exception as e:
-        print("  could not unpack %s: %s" % (name, e), file=sys.stderr)
-        return None
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-
-    got = find_proton(root, name)
-    if got:
-        print("  installed %s" % name)
-    else:
-        print("  %s did not unpack into the expected folder" % name, file=sys.stderr)
-    return got
+            names.add(got or entry)
+    return names
 
 
-def ensure_proton_installed(root, name=TARGET_PROTON):
-    """Path to `name`, installing it if it isn't there yet. None if unavailable."""
-    have = find_proton(root, name)
-    if have:
-        print("  %s already installed" % name)
-        return have
-    return install_proton(root, name)
+def choose_proton(appid, roots):
+    """The compat-tool name to map this appid to. Never returns something that
+    isn't (or won't be) installed: Valve Protons always qualify, community ones
+    only when present. Falls back to DEFAULT_PROTON, then FALLBACK_PROTON."""
+    community = community_tools(roots)
+
+    def usable(name):
+        return name in _VALVE_PROTONS or name in community
+
+    for want in PROTON_BY_APP.get(str(appid), []):
+        if usable(want):
+            return want
+        print("  compat tool: app %s wants %s but it isn't installed, trying next"
+              % (appid, want))
+    if usable(DEFAULT_PROTON):
+        return DEFAULT_PROTON
+    return FALLBACK_PROTON
 
 
 def _name_value_in(text, open_i, close_i):
@@ -366,20 +288,13 @@ def _name_value_in(text, open_i, close_i):
 
 
 def ensure_compat_tool(path, appid, want=None):
-    """Point appid at GE-Proton10-34 in config.vdf's CompatToolMapping, switching
+    """Point appid at stable Proton in config.vdf's CompatToolMapping, switching
     it even when it is already mapped to a different Proton. True if changed.
 
     Forcing the switch is deliberate: the Denuvo hook is built against the modern
     Proton unixlib ABI, and a game left on Proton 7 or an old GE fails in ways
     that look like a broken activation rather than a wrong Proton."""
-    root = os.path.dirname(os.path.dirname(path))  # <root>/config/config.vdf -> <root>
-    if want:
-        proton = want
-    else:
-        got = ensure_proton_installed(root)
-        proton = os.path.basename(got) if got else newest_proton(root)
-    if not proton:
-        return False
+    proton = want or FALLBACK_PROTON
 
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         text = fh.read()
@@ -453,6 +368,9 @@ def main():
     if not roots:
         manual_fallback("no Steam install auto-detected")
 
+    proton = choose_proton(appid, roots)
+    print(f"  compat tool: app {appid} -> {proton}")
+
     lc_files = []
     for root in roots:
         lc_files += glob.glob(os.path.join(root, "userdata", "*", "config", "localconfig.vdf"))
@@ -474,22 +392,20 @@ def main():
     for root in roots:
         cfg = os.path.join(root, "config", "config.vdf")
         if os.path.isfile(cfg):
-            # Resolve the Proton once so the per-game override AND the global
-            # default land on the SAME build. Steam stores the "Default
+            # The per-game override AND the global default go on the SAME
+            # Proton. Steam stores the "Default
             # compatibility tool" (Steam Play for all other titles) as appid 0
             # in the very same CompatToolMapping. If that default disagrees with
             # the per-game override, Steam quietly falls back to it on the next
             # launch and after a reboot, dropping the game onto the wrong Proton
             # so the activation looks like it vanished. Set both to match.
-            got = ensure_proton_installed(root)
-            proton = os.path.basename(got) if got else newest_proton(root)
             try:
                 ensure_compat_tool(cfg, appid, want=proton)
                 ensure_compat_tool(cfg, "0", want=proton)
             except Exception as e:
                 print(f"  WARN could not set compat tool in {cfg}: {e}", file=sys.stderr)
                 print(f"  Set it by hand: Steam -> Settings -> Compatibility ->"
-                      f" Default compatibility tool -> {TARGET_PROTON}, and the same"
+                      f" Default compatibility tool -> {proton}, and the same"
                       f" under the game's Properties -> Compatibility.", file=sys.stderr)
 
     if changed == 0:
