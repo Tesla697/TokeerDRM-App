@@ -27,11 +27,14 @@ Exit 0 on success (at least one file edited), 2 if nothing could be written.
 """
 
 import glob
+import hashlib
 import os
 import re
 import shutil
 import sys
+import tarfile
 import time
+import urllib.request
 
 
 # --------------------------------------------------------------------------- #
@@ -228,7 +231,76 @@ _VALVE_PROTONS = {
 PROTON_BY_APP = {
     "1570010": ["proton_11"],   # FAR: Changing Tides (confirmed)
     "3321460": ["proton_11"],   # Crimson Desert (confirmed)
+    # Experimental and 11.0-2 freeze the pre-rendered cutscenes (Proton #10327).
+    # GE's own tarball registers as -x86_64; older installs may use the bare name.
+    "4115450": ["GE-Proton11-11-x86_64", "GE-Proton11-11"],   # Phantom Blade Zero (confirmed)
 }
+
+GE_RELEASES = "https://github.com/GloriousEggroll/proton-ge-custom/releases/download"
+
+
+def install_ge_proton(name, roots):
+    """Download a GE-Proton build into compatibilitytools.d when a game is pinned
+    to one that isn't there. Checked against the release's sha512 and unpacked
+    beside the final folder first, so a cut-off download never leaves a half
+    tool Steam would try to use. True once it's installed."""
+    dest = os.path.join(roots[0], "compatibilitytools.d")
+    tag = name[:-len("-x86_64")] if name.endswith("-x86_64") else name
+    asset = "%s-x86_64.tar.gz" % tag
+    base = "%s/%s/" % (GE_RELEASES, tag)
+    tmp = os.path.join(dest, ".tokeer-" + asset)
+    staging = os.path.join(dest, ".tokeer-" + name)
+    try:
+        os.makedirs(dest, exist_ok=True)
+        req = urllib.request.Request(base + "%s-x86_64.sha512sum" % tag,
+                                     headers={"User-Agent": "tokeer"})
+        want = urllib.request.urlopen(req, timeout=30).read().decode().split()[0].lower()
+
+        print("  compat tool: downloading %s (one time, a few hundred MB)..." % name)
+        req = urllib.request.Request(base + asset, headers={"User-Agent": "tokeer"})
+        h = hashlib.sha512()
+        with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as out:
+            total = int(resp.headers.get("Content-Length") or 0)
+            got, shown = 0, -1
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                out.write(chunk)
+                h.update(chunk)
+                got += len(chunk)
+                pct = got * 100 // total if total else 0
+                if total and pct // 10 != shown:
+                    shown = pct // 10
+                    print("    %d%%" % pct)
+        if h.hexdigest() != want:
+            print("  compat tool: %s download is corrupt (checksum mismatch)" % name)
+            return False
+
+        shutil.rmtree(staging, ignore_errors=True)
+        with tarfile.open(tmp) as tar:
+            if hasattr(tarfile, "data_filter"):
+                tar.extractall(staging, filter="data")
+            else:
+                tar.extractall(staging)
+        inner = [os.path.join(staging, d) for d in os.listdir(staging)]
+        if len(inner) != 1 or not os.path.isfile(os.path.join(inner[0], "compatibilitytool.vdf")):
+            print("  compat tool: %s archive isn't laid out as expected" % name)
+            return False
+        final = os.path.join(dest, os.path.basename(inner[0]))
+        shutil.rmtree(final, ignore_errors=True)
+        os.replace(inner[0], final)
+        print("  compat tool: installed %s -> %s" % (name, final))
+        return name in community_tools(roots)
+    except Exception as e:
+        print("  compat tool: couldn't install %s: %s" % (name, e))
+        return False
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def community_tools(roots):
@@ -272,11 +344,16 @@ def choose_proton(appid, roots):
     def usable(name):
         return name in _VALVE_PROTONS or name in community
 
-    for want in PROTON_BY_APP.get(str(appid), []):
+    wants = PROTON_BY_APP.get(str(appid), [])
+    for want in wants:
         if usable(want):
             return want
-        print("  compat tool: app %s wants %s but it isn't installed, trying next"
-              % (appid, want))
+    ge = next((w for w in wants if w.startswith("GE-Proton")), None)
+    if ge and install_ge_proton(ge, roots):
+        return ge
+    if wants:
+        print("  compat tool: app %s wants %s but none is installed, using the default"
+              % (appid, " / ".join(wants)))
     if usable(DEFAULT_PROTON):
         return DEFAULT_PROTON
     return FALLBACK_PROTON
