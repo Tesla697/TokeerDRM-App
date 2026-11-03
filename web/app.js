@@ -552,6 +552,11 @@ function setUpdateProgress(p, m) {
 // matching notes once, then remembers the version so it never nags again. Add a
 // new entry here every release.
 const PATCH_NOTES = {
+  "1.0.35": [
+    "Your saves now come back when you reactivate a game. Lots of games keep a separate save folder for each activation, so a new code used to start you from zero. The app now finds your last save and moves it over before the game opens.",
+    "Before anything gets replaced, your saves are backed up to %LOCALAPPDATA%\\TokeerDRM\\SaveVault (the last 10 per game), so nothing is ever lost.",
+    "Fixed the app showing Offline on some internet providers. It now connects a different way when your provider blocks the server, so you don't need WARP anymore.",
+  ],
   "1.0.34": [
     "Fixed a 00 error caused by another unlocker hiding in your Steam folder (like a DWrite.dll from Luma). The app now spots it, tells you, and turns it off when you click Finish setup.",
     "Installing OpenSteamTool no longer says it worked when it didn't. If your antivirus removes the files, or Windows ran the install on a different account, you now get told what happened and what to do.",

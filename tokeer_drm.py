@@ -11,17 +11,20 @@ code-store server. Exposed to JS as `window.pywebview.api.*`.
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import traceback
+import urllib.parse
 
 import requests
 
 import ost_setup
 import save_watchdog
+import save_vault
 
 try:
     import webview
@@ -44,8 +47,12 @@ try:
     from server_config import SERVER_URL  # gitignored; bundled into the exe at build
 except ImportError:
     SERVER_URL = "http://your-server:8091"  # see server_config.example.py
+try:
+    from server_config import SERVER_URLS  # tried in order, first one that connects wins
+except ImportError:
+    SERVER_URLS = [SERVER_URL]
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.34"                       # bump on every release
+APP_VERSION = "1.0.35"                       # bump on every release
 UPDATE_REPO = "luatools-dedivision/TokeerDRM-App"  # Forgejo repo whose latest release gates the app
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
@@ -399,8 +406,67 @@ def _write_ticket_helper_main() -> dict:
     return {"ok": True, "hives": n}
 
 
+# Some ISPs block the code store's raw IP/port (the app sits on Offline until the
+# user turns on WARP) and some filter .xyz at DNS. So every call walks SERVER_URLS
+# (Cloudflare host first, raw IP last), sticks with whichever one answered, and if
+# a host won't connect we look it up over DNS-over-HTTPS and retry once.
+_DOH_ENDPOINTS = (
+    "https://1.1.1.1/dns-query",
+    "https://1.0.0.1/dns-query",
+    "https://8.8.8.8/resolve",
+)
+_dns_pins: dict[str, str] = {}
+_orig_getaddrinfo = socket.getaddrinfo
+_good_server = None
+
+
+def _pinned_getaddrinfo(host, *args, **kwargs):
+    return _orig_getaddrinfo(_dns_pins.get(host, host), *args, **kwargs)
+
+
+def _pin_host(host: str) -> bool:
+    """Resolve host over DoH and pin it. TLS still checks the real name."""
+    if not host or host in _dns_pins or host.replace(".", "").isdigit():
+        return False
+    for doh in _DOH_ENDPOINTS:
+        try:
+            r = requests.get(doh, params={"name": host, "type": "A"},
+                             headers={"Accept": "application/dns-json"}, timeout=6)
+            ips = [a["data"] for a in r.json().get("Answer", []) if a.get("type") == 1]
+        except Exception:
+            continue
+        if ips:
+            _dns_pins[host] = ips[0]
+            socket.getaddrinfo = _pinned_getaddrinfo
+            return True
+    return False
+
+
+def _server_request(method: str, path: str, timeout: int = 25, **kw) -> requests.Response:
+    global _good_server
+    servers = [s.rstrip("/") for s in SERVER_URLS if s]
+    if _good_server in servers:
+        servers.remove(_good_server)
+        servers.insert(0, _good_server)
+    last = None
+    for base in servers:
+        host = urllib.parse.urlparse(base).hostname or ""
+        for attempt in range(2):
+            try:
+                r = requests.request(method, base + path, timeout=(6, timeout), **kw)
+                _good_server = base
+                return r
+            except requests.exceptions.ConnectionError as e:
+                # Only failed connects move on. A read timeout may already have
+                # reached the server, and a redeem must not be sent twice.
+                last = e
+                if attempt or not _pin_host(host):
+                    break
+    raise last
+
+
 def _server_post(path: str, body: dict, timeout: int = 25) -> tuple[int, dict]:
-    r = requests.post(SERVER_URL.rstrip("/") + path, json=body, timeout=timeout)
+    r = _server_request("POST", path, json=body, timeout=timeout)
     try:
         data = r.json()
     except Exception:
@@ -471,11 +537,11 @@ class Api:
     def status(self) -> dict:
         """Server reachability — drives the live status pill."""
         try:
-            r = requests.get(SERVER_URL.rstrip("/") + "/health", timeout=6)
+            r = _server_request("GET", "/health", timeout=6)
             ok = r.status_code == 200 and r.json().get("success")
-            return {"online": bool(ok), "server": SERVER_URL}
+            return {"online": bool(ok), "server": _good_server}
         except Exception:
-            return {"online": False, "server": SERVER_URL}
+            return {"online": False, "server": _good_server}
 
     # -- Force update --------------------------------------------------------
     def version_info(self) -> dict:
@@ -995,6 +1061,10 @@ class Api:
         if not app_id or not appticket or not eticket:
             return {"ok": False, "error": "Server returned an incomplete ticket."}
 
+        # The id the game ran under last time. Its saves may sit in a folder named
+        # after it, which the vault carries over to the new id below.
+        prev_sid = save_watchdog._registry_steam_id(app_id)
+
         try:
             _write_registry(app_id, appticket, eticket)
         except Exception as e:
@@ -1026,6 +1096,10 @@ class Api:
         # activation before the game opens, then launches the game itself.
         if owner and save_watchdog.is_supported(app_id):
             save_watchdog.start(app_id, owner, ui=_push_save)
+        elif owner:
+            # Everything else: saves kept per SteamID move to the new id. Done
+            # before returning so the one-click launch can't race the copy.
+            save_vault.carry_over(app_id, prev_sid, owner, ui=_push_save)
 
         return {
             "ok": True,
