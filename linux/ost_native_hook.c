@@ -689,6 +689,19 @@ __attribute__((constructor)) static void ost_init(void)
     read_proc("/proc/self/comm", g_comm, sizeof g_comm, 0);
     read_proc("/proc/self/cmdline", g_cmd, sizeof g_cmd, 1);
     g_interesting = (strstr(g_cmd, ".exe") != NULL) || (strstr(g_cmd, ".EXE") != NULL);
+    // A process started by the game through CreateProcess (launcher -> game, like
+    // Lost Judgment's startup.exe) comes up as "wine64 <args>" with no exe name in
+    // argv, so it has to be caught by the loader name instead.
+    if (!g_interesting && resolve_appid()) {
+        char argv0[512];
+        snprintf(argv0, sizeof argv0, "%s", g_cmd);
+        char *sp = strchr(argv0, ' ');
+        if (sp) *sp = 0;
+        const char *a0 = strrchr(argv0, '/');
+        a0 = a0 ? a0 + 1 : argv0;
+        if (strncmp(a0, "wine", 4) == 0 && strncmp(a0, "wineserver", 10) != 0)
+            g_interesting = 1;
+    }
 
     // Fake the RequestEncryptedAppTicket handle by default: passing it through
     // to real Steam fails at the API-call level (unowned app) and Denuvo aborts
