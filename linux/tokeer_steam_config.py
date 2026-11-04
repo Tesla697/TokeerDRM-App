@@ -5,8 +5,8 @@ Auto-configure Steam for a Tokeer Linux/Proton game - no manual Steam UI.
 Given an appid + the launch-option string, this:
   1. sets the game's **Launch Options** in every user's localconfig.vdf,
   2. maps the game to the best Proton for it via config.vdf's CompatToolMapping -
-     a per-game pick (see choose_proton), defaulting to Proton Experimental.
-     Steam installs the Valve Protons itself on first launch. It switches even
+     a per-game pick (see choose_proton), defaulting to GE-Proton 11-11
+     (downloaded if missing). Steam installs the Valve Protons itself on first launch. It switches even
      when the game is already mapped to another Proton, because the Denuvo hook
      needs a modern Proton ABI and an old build fails in ways that look like a
      broken activation, and
@@ -201,21 +201,17 @@ def set_launch_options(path, appid, opts):
 # So instead of forcing one version we pick the best available per game:
 #   1. a per-app override (PROTON_BY_APP) for titles we've pinned to a known-good
 #      version - first entry that's actually installed wins,
-#   2. otherwise Proton Experimental, Valve's most up-to-date build. Steam
-#      auto-installs it the same way it did stable 11, and of the always-available
-#      Valve Protons it's the one most likely to run an arbitrary new title,
-#   3. and if a game's override names a community build (a GE-Proton in
-#      compatibilitytools.d), we only use it when it's really there.
+#   2. otherwise GE-Proton 11-11, downloaded into compatibilitytools.d when
+#      it isn't there yet,
+#   3. and Proton Experimental if that download fails.
 #
 # Internal CompatToolMapping names: proton_experimental, proton_11, proton_9,
 # proton_hotfix, ...; community tools use the key in their compatibilitytool.vdf
 # (e.g. GE-Proton9-20). The Valve names below always "resolve" because Steam
 # fetches them on first launch; community names must be detected on disk.
-DEFAULT_PROTON = "proton_experimental"
-# Last resort if even the default somehow can't be used - the version every
-# Tokeer game ran on before this per-game logic existed, so behaviour can only
-# improve, never regress.
-FALLBACK_PROTON = "proton_11"
+DEFAULT_PROTON = ["GE-Proton11-11-x86_64", "GE-Proton11-11"]
+# Used when GE-Proton 11-11 isn't installed and the download fails.
+FALLBACK_PROTON = "proton_experimental"
 
 # Valve Protons Steam will install on demand, so they count as available without
 # being on disk yet. Anything not here must be found in compatibilitytools.d.
@@ -227,7 +223,7 @@ _VALVE_PROTONS = {
 # Per-app Proton preference, highest first. Pin a game here when a specific
 # version is the one that actually boots it. The confirmed-working titles are
 # pinned to stable 11 (what they run on today) so smartening the default can't
-# regress them; everything unlisted gets DEFAULT_PROTON.
+# regress them; everything unlisted gets DEFAULT_PROTON (GE-Proton 11-11).
 PROTON_BY_APP = {
     "1570010": ["proton_11"],   # FAR: Changing Tides (confirmed)
     "3321460": ["proton_11"],   # Crimson Desert (confirmed)
@@ -338,24 +334,21 @@ def community_tools(roots):
 def choose_proton(appid, roots):
     """The compat-tool name to map this appid to. Never returns something that
     isn't (or won't be) installed: Valve Protons always qualify, community ones
-    only when present. Falls back to DEFAULT_PROTON, then FALLBACK_PROTON."""
+    only when present (GE ones get downloaded). Falls back to FALLBACK_PROTON."""
     community = community_tools(roots)
 
     def usable(name):
         return name in _VALVE_PROTONS or name in community
 
-    wants = PROTON_BY_APP.get(str(appid), [])
+    wants = PROTON_BY_APP.get(str(appid)) or DEFAULT_PROTON
     for want in wants:
         if usable(want):
             return want
     ge = next((w for w in wants if w.startswith("GE-Proton")), None)
     if ge and install_ge_proton(ge, roots):
         return ge
-    if wants:
-        print("  compat tool: app %s wants %s but none is installed, using the default"
-              % (appid, " / ".join(wants)))
-    if usable(DEFAULT_PROTON):
-        return DEFAULT_PROTON
+    print("  compat tool: app %s wants %s but none is installed, using %s"
+          % (appid, " / ".join(wants), FALLBACK_PROTON))
     return FALLBACK_PROTON
 
 
