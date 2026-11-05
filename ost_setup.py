@@ -1645,10 +1645,37 @@ def custom_dll_needs_update(sp=None):
     _, dll_hash = _installed_dll_hash(sp)
     if not dll_hash:
         return False
-    _, latest_hashes = _latest_custom_dll()
+    latest_tag, latest_hashes = _latest_custom_dll()
     if not latest_hashes:
         return False  # offline / API down → can't tell, don't nag
-    return dll_hash not in latest_hashes
+    if dll_hash in latest_hashes:
+        return False
+    # The cached "latest" can lag behind for hours (6h when GitHub answered), while
+    # the installer always looks it up fresh. If the marker says this exact DLL came
+    # from a release at least as new as the cached one, it's current, otherwise the
+    # Update button loops forever on a release that's already installed.
+    stored_hash, stored_tag = _read_marker(sp)
+    if stored_hash == dll_hash and _tag_key(stored_tag) >= _tag_key(latest_tag):
+        return False
+    return True
+
+
+def _read_marker(sp):
+    """(hash, tag) recorded in the custom-DLL marker, ("", "") if there isn't one."""
+    try:
+        with open(os.path.join(sp, _CUSTOM_MARKER), "r", encoding="utf-8") as f:
+            parts = f.read().strip().split(":")
+    except OSError:
+        return "", ""
+    return (parts[0] if parts else ""), (parts[2] if len(parts) >= 3 else "")
+
+
+def _tag_key(tag):
+    """v1.0.7 -> (1, 0, 7). Anything unparseable sorts lowest."""
+    try:
+        return tuple(int(p) for p in (tag or "").lstrip("vV").split("."))
+    except ValueError:
+        return ()
 
 
 def _download_bytes(url, progress=_noop, lo=15, hi=60, timeout=120):

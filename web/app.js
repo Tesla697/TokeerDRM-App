@@ -552,6 +552,10 @@ function setUpdateProgress(p, m) {
 // matching notes once, then remembers the version so it never nags again. Add a
 // new entry here every release.
 const PATCH_NOTES = {
+  "1.0.36": [
+    "Updates download a lot faster now. They come from a server close to you instead of one far away, so the update that used to take an hour for some people should take seconds.",
+    "Fixed the Update button for the enhanced DLL sometimes showing again right after you already updated.",
+  ],
   "1.0.35": [
     "Your saves now come back when you reactivate a game. Lots of games keep a separate save folder for each activation, so a new code used to start you from zero. The app now finds your last save and moves it over before the game opens.",
     "Before anything gets replaced, your saves are backed up to %LOCALAPPDATA%\\TokeerDRM\\SaveVault (the last 10 per game), so nothing is ever lost.",

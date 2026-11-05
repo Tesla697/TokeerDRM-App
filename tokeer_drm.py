@@ -52,7 +52,7 @@ try:
 except ImportError:
     SERVER_URLS = [SERVER_URL]
 APP_TITLE = "TokeerDRM"
-APP_VERSION = "1.0.35"                       # bump on every release
+APP_VERSION = "1.0.36"                       # bump on every release
 UPDATE_REPO = "luatools-dedivision/TokeerDRM-App"  # Forgejo repo whose latest release gates the app
 # Forgejo's own download links skip the CDN and crawl on some routes, so updates
 # come through the luastools.xyz edge mirror and fall back to Forgejo.
