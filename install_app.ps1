@@ -18,12 +18,21 @@ Write-Host "`n=== TokeerDRM App Setup ===`n" -ForegroundColor Magenta
 
 # 1. find the latest release exe
 Step 'Finding the latest TokeerDRM release...'
-try {
-    $rel = Invoke-RestMethod 'https://git.lua.tools/api/v1/repos/luatools-dedivision/TokeerDRM-App/releases/latest' -Headers $UA
-} catch { Die "Couldn't reach the release server: $($_.Exception.Message)" }
+# luastools.xyz mirror first: it serves the exe from Cloudflare's edge. Forgejo's
+# own download links skip the CDN and crawl on some routes.
+$rel = $null
+foreach ($api in @('https://luastools.xyz/app/latest',
+                   'https://git.lua.tools/api/v1/repos/luatools-dedivision/TokeerDRM-App/releases/latest')) {
+    try { $rel = Invoke-RestMethod $api -Headers $UA -TimeoutSec 20; if ($rel.tag_name) { break } } catch { $rel = $null }
+}
+if (-not $rel) { Die "Couldn't reach the release server. Check your connection and try again." }
 $asset = $rel.assets | Where-Object { $_.name -match '(?i)\.exe$' } | Select-Object -First 1
 if (-not $asset) { Die 'No .exe found on the latest release.' }
 Good "Latest: $($rel.tag_name)"
+$sources = @(
+    "https://luastools.xyz/app/asset?tag=$($rel.tag_name)&name=$($asset.name)",
+    "https://git.lua.tools/luatools-dedivision/TokeerDRM-App/releases/download/$($rel.tag_name)/$($asset.name)"
+) | Select-Object -Unique
 
 # 2. close any running instance so we can overwrite it
 Get-Process -Name 'TokeerDRM' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -34,8 +43,14 @@ $dir = Join-Path $env:LOCALAPPDATA 'TokeerDRM'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $exe = Join-Path $dir 'TokeerDRM.exe'
 Step "Downloading $($asset.name)..."
-try { Invoke-WebRequest $asset.browser_download_url -OutFile $exe -Headers $UA }
-catch { Die "Download failed: $($_.Exception.Message)" }
+$ok = $false
+foreach ($src in $sources) {
+    try {
+        Invoke-WebRequest $src -OutFile $exe -Headers $UA -UseBasicParsing
+        if ((Get-Item $exe).Length -eq [int64]$asset.size -or -not $asset.size) { $ok = $true; break }
+    } catch { Write-Host "    [!] $src failed, trying the next one" -ForegroundColor Yellow }
+}
+if (-not $ok) { Die 'Download failed from every server. Check your connection and try again.' }
 Good "Installed to $exe"
 
 # 4. Desktop + Start Menu shortcuts

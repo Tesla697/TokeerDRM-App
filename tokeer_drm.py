@@ -54,6 +54,25 @@ except ImportError:
 APP_TITLE = "TokeerDRM"
 APP_VERSION = "1.0.35"                       # bump on every release
 UPDATE_REPO = "luatools-dedivision/TokeerDRM-App"  # Forgejo repo whose latest release gates the app
+# Forgejo's own download links skip the CDN and crawl on some routes, so updates
+# come through the luastools.xyz edge mirror and fall back to Forgejo.
+UPDATE_MIRROR = "https://luastools.xyz/app"
+UPDATE_DOWNLOAD = UPDATE_MIRROR + "/download"
+
+
+def _latest_release(timeout):
+    """Latest release JSON (tag_name + assets), mirror first. None if both fail."""
+    for url in (UPDATE_MIRROR + "/latest",
+                f"https://git.lua.tools/api/v1/repos/{UPDATE_REPO}/releases/latest"):
+        try:
+            r = requests.get(url, headers={"User-Agent": "TokeerDRM"}, timeout=timeout)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("tag_name") and isinstance(d.get("assets"), list):
+                    return d
+        except Exception:
+            pass
+    return None
 WINDOW = None  # set in main(); lets the API push install progress to the UI
 
 # ---------------------------------------------------------------------------
@@ -548,19 +567,13 @@ class Api:
         """Compare this build with the latest GitHub release. update_required=True
         blocks the whole UI until the user updates."""
         info = {"current": APP_VERSION, "latest": APP_VERSION, "update_required": False,
-                "url": f"https://git.lua.tools/{UPDATE_REPO}/releases/latest"}
-        try:
-            r = requests.get(f"https://git.lua.tools/api/v1/repos/{UPDATE_REPO}/releases/latest",
-                             headers={"User-Agent": "TokeerDRM"}, timeout=8)
-            if r.status_code == 200:
-                d = r.json()
-                tag = (d.get("tag_name") or "").lstrip("vV")
-                if tag:
-                    info["latest"] = tag
-                    info["update_required"] = _version_gt(tag, APP_VERSION)
-                info["url"] = d.get("html_url") or info["url"]
-        except Exception:
-            pass  # offline / API down → don't block
+                "url": UPDATE_DOWNLOAD}
+        d = _latest_release(8)
+        if d:
+            tag = (d.get("tag_name") or "").lstrip("vV")
+            if tag:
+                info["latest"] = tag
+                info["update_required"] = _version_gt(tag, APP_VERSION)
         return info
 
     def open_url(self, url: str) -> dict:
@@ -588,30 +601,54 @@ class Api:
 
         try:
             progress(5, "Finding the latest release…")
-            r = requests.get(f"https://git.lua.tools/api/v1/repos/{UPDATE_REPO}/releases/latest",
-                             headers={"User-Agent": "TokeerDRM"}, timeout=20)
-            r.raise_for_status()
-            asset = next((a for a in r.json().get("assets", [])
+            rel = _latest_release(20)
+            if not rel:
+                return {"ok": False, "message": "Couldn't reach the update server. Check your connection and try again."}
+            tag = rel.get("tag_name") or ""
+            asset = next((a for a in rel.get("assets", [])
                           if a.get("name", "").lower().endswith(".exe")), None)
             if not asset:
                 return {"ok": False, "message": "The latest release has no .exe to download."}
 
             cur_exe = ost_setup._self_exe()
             new_exe = cur_exe + ".new"
-            progress(10, "Downloading update…")
-            with requests.get(asset["browser_download_url"], headers={"User-Agent": "TokeerDRM"},
-                              timeout=600, stream=True) as dl:
-                dl.raise_for_status()
-                total = int(dl.headers.get("Content-Length") or 0)
-                got = 0
-                with open(new_exe, "wb") as f:
-                    for chunk in dl.iter_content(65536):
-                        if not chunk:
-                            continue
-                        f.write(chunk)
-                        got += len(chunk)
-                        if total:
-                            progress(10 + int(got * 85 / total), "Downloading update…")
+            # Mirror first (edge cached), then the release host itself.
+            sources = [f"{UPDATE_MIRROR}/asset?tag={urllib.parse.quote(tag)}"
+                       f"&name={urllib.parse.quote(asset['name'])}"]
+            if asset.get("browser_download_url") and asset["browser_download_url"] not in sources:
+                sources.append(asset["browser_download_url"])
+            sources.append(f"https://git.lua.tools/{UPDATE_REPO}/releases/download/"
+                           f"{urllib.parse.quote(tag)}/{urllib.parse.quote(asset['name'])}")
+            want = int(asset.get("size") or 0)
+            last_err = None
+            for src in sources:
+                progress(10, "Downloading update…")
+                try:
+                    with requests.get(src, headers={"User-Agent": "TokeerDRM"},
+                                      timeout=(15, 120), stream=True) as dl:
+                        dl.raise_for_status()
+                        total = int(dl.headers.get("Content-Length") or 0) or want
+                        got = 0
+                        with open(new_exe, "wb") as f:
+                            for chunk in dl.iter_content(65536):
+                                if not chunk:
+                                    continue
+                                f.write(chunk)
+                                got += len(chunk)
+                                if total:
+                                    progress(10 + int(got * 85 / total), "Downloading update…")
+                    if want and got != want:
+                        raise IOError(f"got {got} of {want} bytes")
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    try:
+                        os.remove(new_exe)
+                    except OSError:
+                        pass
+            if last_err is not None:
+                raise last_err
 
             progress(98, "Installing update…")
             old_exe = cur_exe + ".old"

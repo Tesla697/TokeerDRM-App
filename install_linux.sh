@@ -11,7 +11,7 @@
 #
 # Env overrides:
 #   TOKEER_DRM_SERVER   backend base URL (default https://luastools.xyz)
-#   TOKEER_BUNDLE_URL   bundle zip URL (default: latest GitHub release asset)
+#   TOKEER_BUNDLE_URL   bundle zip URL (default: the release asset via the luastools.xyz mirror)
 #   TOKEER_HOME         install dir (default ~/.tokeer)
 #
 set -euo pipefail
@@ -32,7 +32,10 @@ MODE="${2:-steam}"
 
 TDIR="${TOKEER_HOME:-$HOME/.tokeer}"
 SERVER="${TOKEER_DRM_SERVER:-https://luastools.xyz}"
-BUNDLE_URL="${TOKEER_BUNDLE_URL:-https://git.lua.tools/luatools-dedivision/TokeerDRM-App/releases/download/v1.0.35/tokeer-linux.zip}"
+BUNDLE_TAG="v1.0.35"
+# Edge mirror first (Forgejo's own links skip the CDN and crawl on some routes).
+BUNDLE_URL="${TOKEER_BUNDLE_URL:-https://luastools.xyz/app/asset?tag=$BUNDLE_TAG&name=tokeer-linux.zip}"
+BUNDLE_FALLBACK="https://git.lua.tools/luatools-dedivision/TokeerDRM-App/releases/download/$BUNDLE_TAG/tokeer-linux.zip"
 
 echo "== Tokeer Linux setup - app $APPID =="
 mkdir -p "$TDIR"
@@ -53,7 +56,10 @@ if [ "$have_local" = 1 ]; then
 else
     echo "[1/7] downloading bundle -> $BUNDLE_URL"
     tmp="$(mktemp -d)"
-    curl -fsSL "$BUNDLE_URL" -o "$tmp/b.zip"
+    if ! curl -fsSL "$BUNDLE_URL" -o "$tmp/b.zip"; then
+        echo "      mirror failed, trying $BUNDLE_FALLBACK"
+        curl -fsSL "$BUNDLE_FALLBACK" -o "$tmp/b.zip"
+    fi
     unzip -oq "$tmp/b.zip" -d "$tmp/x"
     hookc="$(find "$tmp/x" -name ost_native_hook.c | head -1)"
     [ -n "$hookc" ] || { echo "ERROR: bundle has no ost_native_hook.c" >&2; exit 1; }
