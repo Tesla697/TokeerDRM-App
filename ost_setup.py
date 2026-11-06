@@ -46,6 +46,15 @@ OST_PROXY_RELEASE = "https://luastools.xyz/ost/latest"
 # Same worker, one asset. Kept separately so a download can be retried through the
 # mirror even when the release JSON came from api.github.com, and the other way round.
 OST_PROXY_ASSET   = "https://luastools.xyz/ost/asset"
+# The DLL updates itself from latest.toml on the updates branch, not from the release.
+# We read it too, otherwise a DLL that just updated itself looks foreign whenever our
+# cached release info is behind (rate limited, mirror blocked) and Fix puts the old
+# build back, which then updates itself again.
+BST_UPDATE_MIRRORS = (
+    "https://raw.githubusercontent.com/madoiscool/BetterSteamTools/updates/{}",
+    "https://cdn.jsdelivr.net/gh/madoiscool/BetterSteamTools@updates/{}",
+    "https://git.lua.tools/luatools/BetterSteamTools/raw/branch/updates/{}",
+)
 # On-demand eticket mint endpoint (Cloudflare-fronted; origin IP hidden, rate
 # limited). Written into a lua so the BetterSteamTools DLL enables minting.
 ETICKET_URL       = "https://luastools.xyz/eticket"
@@ -1552,6 +1561,41 @@ def _latest_custom_dll(timeout=10):
     return tag, frozenset(hashes)
 
 
+_bst_pointer_cache = {"at": 0.0, "val": None}
+
+
+def _bst_pointer(timeout=8):
+    """(version, path, sha256) from the self-updater's latest.toml, or None."""
+    now = time.time()
+    if _bst_pointer_cache["at"] and now - _bst_pointer_cache["at"] < 600:
+        return _bst_pointer_cache["val"]
+    val = None
+    for base in BST_UPDATE_MIRRORS:
+        try:
+            req = urllib.request.Request(base.format("opensteamtool/latest.toml"),
+                                         headers={"User-Agent": "TokeerDRM"})
+            text = urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "replace")
+        except Exception:
+            continue
+        kv = dict(re.findall(r'^\s*(\w+)\s*=\s*"([^"]*)"', text, re.M))
+        ver, path, sha = kv.get("version"), kv.get("path"), (kv.get("sha256") or "").lower()
+        if ver and path and len(sha) == 64:
+            val = (ver, path, sha)
+            break
+    _bst_pointer_cache.update(at=now, val=val)
+    return val
+
+
+def _download_pointer_dll(ptr, progress=_noop):
+    """The DLL latest.toml points at, checked against its sha256. b"" on failure."""
+    ver, path, sha = ptr
+    for base in BST_UPDATE_MIRRORS:
+        raw, _ = _download_bytes(base.format(path), progress, lo=15, hi=60)
+        if raw and _sha256_bytes(raw) == sha:
+            return raw
+    return b""
+
+
 def _installed_dll_hash(sp):
     dll_path = os.path.join(sp, "OpenSteamTool.dll")
     if not os.path.exists(dll_path):
@@ -1599,6 +1643,12 @@ def custom_dll_installed(sp=None):
     latest_tag, latest_hashes = _latest_custom_dll()
     if dll_hash in latest_hashes:
         _write_marker(sp, dll_data, latest_tag)  # keep the marker honest
+        return True
+
+    # 2b) Is it what the DLL's own updater installs? Can be ahead of latest_tag.
+    ptr = _bst_pointer()
+    if ptr and dll_hash == ptr[2]:
+        _write_marker(sp, dll_data, ptr[0])
         return True
 
     # 3) Is it an older-but-still-ours build (matches the stored tag's release)?
@@ -1649,6 +1699,9 @@ def custom_dll_needs_update(sp=None):
     if not latest_hashes:
         return False  # offline / API down → can't tell, don't nag
     if dll_hash in latest_hashes:
+        return False
+    ptr = _bst_pointer()
+    if ptr and dll_hash == ptr[2] and _tag_key(ptr[0]) >= _tag_key(latest_tag):
         return False
     # The cached "latest" can lag behind for hours (6h when GitHub answered), while
     # the installer always looks it up fresh. If the marker says this exact DLL came
@@ -1822,6 +1875,15 @@ def install_custom_dll(progress=_noop, restart_steam=True):
     # _release_json prefers our Cloudflare mirror, whose asset URLs are proxied too,
     # so both the lookup and the download stay off the user's GitHub quota.
     data, _src = _release_json(timeout=30)
+
+    # Prefer latest.toml when the release lookup failed or is behind it, so we never
+    # install a build the DLL will immediately replace.
+    ptr = _bst_pointer()
+    if ptr and (data is None or _tag_key(ptr[0]) > _tag_key((data or {}).get("tag_name", ""))):
+        progress(15, "Downloading custom OpenSteamTool.dll…")
+        raw = _download_pointer_dll(ptr, progress)
+        if raw:
+            return _write_custom_dll(sp, raw, ptr[0], progress, restart_steam)
 
     tag = ""
     url = ""

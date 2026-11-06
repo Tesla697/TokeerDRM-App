@@ -552,6 +552,9 @@ function setUpdateProgress(p, m) {
 // matching notes once, then remembers the version so it never nags again. Add a
 // new entry here every release.
 const PATCH_NOTES = {
+  "1.0.37": [
+    "Fixed \"Enhanced DLL needed\" coming back after the DLL updated itself. Clicking Fix used to put the older version back, so you got the update popup again and went round in circles. The app now knows about the DLL's own updates and installs the newest one.",
+  ],
   "1.0.36": [
     "Updates download a lot faster now. They come from a server close to you instead of one far away, so the update that used to take an hour for some people should take seconds.",
     "Fixed the Update button for the enhanced DLL sometimes showing again right after you already updated.",

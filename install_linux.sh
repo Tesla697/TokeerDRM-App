@@ -32,7 +32,7 @@ MODE="${2:-steam}"
 
 TDIR="${TOKEER_HOME:-$HOME/.tokeer}"
 SERVER="${TOKEER_DRM_SERVER:-https://luastools.xyz}"
-BUNDLE_TAG="v1.0.36"
+BUNDLE_TAG="v1.0.37"
 # Edge mirror first (Forgejo's own links skip the CDN and crawl on some routes).
 BUNDLE_URL="${TOKEER_BUNDLE_URL:-https://luastools.xyz/app/asset?tag=$BUNDLE_TAG&name=tokeer-linux.zip}"
 BUNDLE_FALLBACK="https://git.lua.tools/luatools-dedivision/TokeerDRM-App/releases/download/$BUNDLE_TAG/tokeer-linux.zip"
